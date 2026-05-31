@@ -75,6 +75,7 @@ export function createRestTransport(): RestTransport {
   async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const url = `${await currentDraftBaseUrl()}${path}`;
     let response: Response;
+    let body: unknown;
     try {
       response = await fetch(url, {
         method: options.method ?? 'GET',
@@ -82,11 +83,11 @@ export function createRestTransport(): RestTransport {
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: AbortSignal.timeout(5000),
       });
+      body = await readBody(response);
     } catch (error) {
       throw new ControlPlaneError('DAEMON_NOT_RUNNING', `Failed to reach Revisium daemon: ${path}`, { details: error });
     }
 
-    const body = await readBody(response);
     if (!response.ok) throw errorForStatus(response.status, path, body);
     return body as T;
   }
