@@ -7,8 +7,10 @@ import { headRestBaseUrl } from '../src/control-plane/rest-transport.js';
 
 const require = createRequire(import.meta.url);
 const tsxPackagePath = require.resolve('tsx/package.json');
-const tsxPackage = require(tsxPackagePath) as { bin: string };
-const tsxCliPath = join(dirname(tsxPackagePath), tsxPackage.bin);
+const tsxPackage = require(tsxPackagePath) as { bin: string | Record<string, string> };
+const tsxBin = typeof tsxPackage.bin === 'string' ? tsxPackage.bin : tsxPackage.bin.tsx;
+if (!tsxBin) throw new Error('Could not resolve tsx CLI path from package.json');
+const tsxCliPath = join(dirname(tsxPackagePath), tsxBin);
 
 type CliResult = {
   stdout: string;
@@ -32,7 +34,7 @@ function runCli(args: string[]): Promise<CliResult> {
       stderr += chunk;
     });
     child.on('error', reject);
-    child.on('exit', (status) => resolve({ stdout, stderr, status }));
+    child.on('close', (status) => resolve({ stdout, stderr, status }));
   });
 }
 
