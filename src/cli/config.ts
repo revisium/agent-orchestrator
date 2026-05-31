@@ -22,6 +22,12 @@ type ConfigFile = {
   branch: string;
 };
 
+export type RevoConfig = ConfigFile & {
+  dataDir: string;
+  logFile: string;
+  runtimeFile: string;
+};
+
 const cliDir = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = resolve(cliDir, '..', '..');
 
@@ -36,22 +42,27 @@ function loadConfig(): ConfigFile {
   return JSON.parse(readFileSync(configPath, 'utf8')) as ConfigFile;
 }
 
-const rawConfig = loadConfig();
+let cachedConfig: RevoConfig | null = null;
 
-export const host = rawConfig.host;
-export const preferredPort = rawConfig.preferredPort;
-export const preferredPgPort = rawConfig.preferredPgPort;
-export const autoDiscover = rawConfig.autoDiscover;
-export const dataDir = expandHome(rawConfig.dataDir);
-export const org = rawConfig.org;
-export const project = rawConfig.project;
-export const branch = rawConfig.branch;
-export const logFile = join(dataDir, 'standalone.log');
-export const runtimeFile = join(dataDir, 'runtime.json');
+export function getConfig(): RevoConfig {
+  if (cachedConfig) return cachedConfig;
 
-mkdirSync(dataDir, { recursive: true });
+  const rawConfig = loadConfig();
+  const dataDir = expandHome(rawConfig.dataDir);
+  mkdirSync(dataDir, { recursive: true });
+
+  cachedConfig = {
+    ...rawConfig,
+    dataDir,
+    logFile: join(dataDir, 'standalone.log'),
+    runtimeFile: join(dataDir, 'runtime.json'),
+  };
+
+  return cachedConfig;
+}
 
 export function readRuntime(): RuntimeState | null {
+  const { runtimeFile } = getConfig();
   if (!existsSync(runtimeFile)) return null;
 
   try {
@@ -62,6 +73,7 @@ export function readRuntime(): RuntimeState | null {
 }
 
 export function removeRuntime(): void {
+  const { runtimeFile } = getConfig();
   if (existsSync(runtimeFile)) rmSync(runtimeFile);
 }
 
@@ -75,6 +87,7 @@ export function isAlive(pid: number): boolean {
 }
 
 export function baseUrl(port: number): string {
+  const { host } = getConfig();
   return `http://${host}:${port}`;
 }
 
@@ -83,6 +96,7 @@ export function healthUrl(port: number): string {
 }
 
 export function revisiumUri(port: number): string {
+  const { host, org, project, branch } = getConfig();
   return `revisium://${host}:${port}/${org}/${project}/${branch}`;
 }
 
@@ -92,6 +106,7 @@ export async function resolvePorts(): Promise<{ httpPort: number; pgPort: number
     return { httpPort: runtime.httpPort, pgPort: runtime.pgPort };
   }
 
+  const { preferredPort, preferredPgPort } = getConfig();
   return { httpPort: preferredPort, pgPort: preferredPgPort };
 }
 

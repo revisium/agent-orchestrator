@@ -1,20 +1,16 @@
 import { spawn } from 'node:child_process';
-import { existsSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { Command } from 'commander';
 import {
   baseUrl,
-  dataDir,
   findFreePort,
+  getConfig,
   healthUrl,
   isAlive,
   isHealthy,
-  logFile,
-  preferredPgPort,
-  preferredPort,
   readRuntime,
   removeRuntime,
-  runtimeFile,
 } from '../config.js';
 
 const require = createRequire(import.meta.url);
@@ -44,7 +40,7 @@ async function waitHealthy(url: string, timeoutMs = 120_000): Promise<boolean> {
   while (Date.now() < deadline) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
-      if (res.status < 500) return true;
+      if (res.status >= 200 && res.status < 400) return true;
     } catch {
       // Not ready yet.
     }
@@ -81,6 +77,7 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 }
 
 async function startRevisium(options: StartOptions): Promise<void> {
+  const config = getConfig();
   const runtime = readRuntime();
   if (runtime && isAlive(runtime.pid)) {
     if (await isHealthy(runtime.httpPort)) {
@@ -95,16 +92,17 @@ async function startRevisium(options: StartOptions): Promise<void> {
 
   if (runtime) removeRuntime();
 
-  const httpPort = await findFreePort(parsePort(options.port, preferredPort));
-  const pgPort = await findFreePort(parsePort(options.pgPort, preferredPgPort));
-  const standaloneDataDir = options.data ?? dataDir;
+  const httpPort = await findFreePort(parsePort(options.port, config.preferredPort));
+  const pgPort = await findFreePort(parsePort(options.pgPort, config.preferredPgPort));
+  const standaloneDataDir = options.data ?? config.dataDir;
   const entry = require.resolve('@revisium/standalone/bin/revisium-standalone.js');
-  const out = openSync(logFile, 'a');
+  const out = openSync(config.logFile, 'a');
   const child = spawn(
     process.execPath,
     [entry, '--port', String(httpPort), '--pg-port', String(pgPort), '--data', standaloneDataDir],
     { detached: true, stdio: ['ignore', out, out] },
   );
+  closeSync(out);
 
   if (!child.pid) {
     throw new Error('Failed to start standalone Revisium');
@@ -112,13 +110,13 @@ async function startRevisium(options: StartOptions): Promise<void> {
 
   child.unref();
   writeFileSync(
-    runtimeFile,
+    config.runtimeFile,
     JSON.stringify({ httpPort, pgPort, pid: child.pid, startedAt: new Date().toISOString() }, null, 2),
   );
 
   if (!(await waitHealthy(healthUrl(httpPort)))) {
     console.error(`Revisium did not become healthy on ${baseUrl(httpPort)} within 120s`);
-    console.error(tailLines(logFile, 20));
+    console.error(tailLines(config.logFile, 20));
     killTree(child.pid, 'SIGTERM');
     await waitForExit(child.pid, 20_000);
     if (isAlive(child.pid)) killTree(child.pid, 'SIGKILL');
@@ -171,6 +169,7 @@ async function statusRevisium(): Promise<void> {
 }
 
 function logsRevisium(options: LogsOptions): void {
+  const { logFile } = getConfig();
   const lines = Number(options.lines ?? 50);
   if (!Number.isInteger(lines) || lines <= 0) {
     throw new Error(`Invalid line count: ${options.lines}`);
