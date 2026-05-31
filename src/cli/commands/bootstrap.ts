@@ -32,6 +32,7 @@ async function runBootstrap(options: BootstrapOptions): Promise<void> {
 
   const child = spawn('npx', args, { stdio: 'inherit' });
   const exitCode = await new Promise<number | null>((resolve) => {
+    child.on('error', () => resolve(1));
     child.on('exit', resolve);
   });
 

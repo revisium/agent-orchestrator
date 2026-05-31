@@ -51,7 +51,7 @@ async function waitHealthy(url: string, timeoutMs = 120_000): Promise<boolean> {
 
 function tailLines(path: string, lines: number): string {
   if (!existsSync(path)) return '';
-  const content = readFileSync(path, 'utf8');
+  const content = readFileSync(path, 'utf8').replace(/(?:\r?\n)+$/, '');
   return content.split(/\r?\n/).slice(-lines).join('\n');
 }
 
@@ -202,7 +202,7 @@ export function registerRevisium(program: Command): void {
 
   revisium
     .command('logs')
-    .option('-n <lines>', 'Number of log lines', '50')
+    .option('-n, --lines <lines>', 'Number of log lines', '50')
     .option('-f, --follow', 'Follow log output')
     .action(logsRevisium);
 }
