@@ -21,8 +21,8 @@ Living page: per-doc draft status, dependencies, and the build-slice roadmap. Up
 
 | Plan | Status | Scope |
 | --- | --- | --- |
-| [0001 — daemon + bootstrap](./plans/0001-revisium-daemon-and-bootstrap.md) | Ready to execute | `revo` daemon CLI + control-plane bootstrap + getting-started/schema docs |
-| 0002 — data-access layer | Not written | implement [repo-layer-contract](./repo-layer-contract.md) on `@revisium/client`; resolve open Q2/Q3 first |
+| [0001 — daemon + bootstrap](./plans/0001-revisium-daemon-and-bootstrap.md) | Executed | `revo` daemon CLI + control-plane bootstrap + getting-started/schema docs |
+| [0002 — control-plane data access](./plans/0002-control-plane-data-access.md) | Executed | minimal generated-REST row access for draft runtime rows |
 | 0003 — worker loop | Not written | the dumb loop (§7): claim → startAttempt → runAgent → writeResult/createSteps; recoverInFlight on startup |
 | 0004 — runner | Not written | `runAgent` for Claude Code headless (§9) |
 | 0005 — roles as data + first real task | Not written | seed roles/model_profiles; run one task end-to-end (§10) |

@@ -12,6 +12,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "revo": "tsx src/cli/index.ts",
+    "smoke:control-plane": "tsx scripts/smoke-control-plane-data-access.ts",
+    "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
