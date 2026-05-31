@@ -26,4 +26,5 @@ reference docs in [`../`](../) (the durable *what / why*).
 
 | Plan | Status |
 | --- | --- |
-| [0001-revisium-daemon-and-bootstrap](./0001-revisium-daemon-and-bootstrap.md) | Ready to execute |
+| [0001-revisium-daemon-and-bootstrap](./0001-revisium-daemon-and-bootstrap.md) | Executed |
+| [0002-control-plane-data-access](./0002-control-plane-data-access.md) | Ready to execute |
