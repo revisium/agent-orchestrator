@@ -1,3 +1,4 @@
+import type { OrderByDto, RowWhereInputDto } from '@revisium/client';
 import { ControlPlaneError } from './errors.js';
 import { deserializeData, serializeData, serializePatches, type PatchOperation } from './json-fields.js';
 import {
@@ -10,8 +11,8 @@ import { isRuntimeTable, type RuntimeTable } from './tables.js';
 export type ListRowsOptions = {
   first?: number;
   after?: string;
-  where?: Record<string, unknown>;
-  orderBy?: Array<Record<string, unknown>>;
+  where?: RowWhereInputDto;
+  orderBy?: OrderByDto[];
 };
 
 export type ControlPlaneRow<TData extends object = Record<string, unknown>> = {

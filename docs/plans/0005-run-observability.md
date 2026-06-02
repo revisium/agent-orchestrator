@@ -112,6 +112,29 @@ if (runId) {
 JS
 ```
 
+**Result (confirmed in PR #9 review cycle, 2026-06-02):**
+
+Probe script `scripts/probe-server-filter.ts` confirmed:
+
+```
+where: { data: { path: 'run_id', equals: runId } }
+```
+
+returns ONLY rows matching `run_id`, scoped server-side. Cross-run isolation was verified: with 3 tasks
+across 3 different runs, the filter returned exactly 1 task for the target run. A non-existent run_id
+returned 0 rows. The same shape works for `steps` and `events`.
+
+The Prisma JSON path+equals filter accepts scalar values at runtime; the SDK-generated TypeScript type
+for `JsonFilterDto.equals` is `{ [key: string]: unknown }` (object-typed), so passing a string requires a
+targeted cast: `runId as unknown as Record<string, unknown>`. This is localized to a single helper
+function `runIdWhere()` in `inspect-run.ts` — the container `RowWhereInputDto` is explicitly typed.
+
+`showRun` (tasks + steps) and `listRunEvents` (events) now push the `run_id` predicate server-side.
+The prior in-process filter (cap-500, memory filter) is removed for per-run reads. The `GLOBAL_CAP`
+(500) is kept as the `first` limit for all reads, but the cap warning is now emitted only for the
+unscoped `listRuns` call — per-run reads are server-side scoped so the cap no longer risks silent
+cross-run data loss.
+
 If System API honors `where` and `orderBy`, push filters into `listRows`.
 If it rejects or ignores them, filter/sort in process with a cap (for example 500) and report the cap.
 
@@ -345,11 +368,17 @@ Open findings:
 
 ### Inherited from 0004 review
 
-- **getScope() scope per call:** `getScope()` rebuilds the client and makes 2 extra round-trips
-  (`fetchHead` / `fetchDraft`) on every transport method call; one `getRow` = 3 HTTP calls. Memoize
-  the scope per transport instance.
-- **updateRow/patchRow non-null assertion:** `updateRow` and `patchRow` use `result.data!.row!` double
-  non-null, but `row?` is optional in those response types — guard and raise
+- **getScope() scope per call:** Resolved in 0004 (#8). `getScope()` is now memoized per transport
+  instance via `cachedScope`; the scope is resolved once and reused across all method calls.
+- **updateRow/patchRow non-null assertion:** Resolved in 0004 (#8). `updateRow` and `patchRow` now
+  call `extractMutationRow(result)` which guards `result.data?.row` and raises
   `HTTP_ERROR('Malformed response')` instead of letting a `TypeError` escape.
-- **ListRowsOptions type gap:** `ListRowsOptions.where` / `orderBy` are `Record<string,unknown>` cast
-  with `as` into the SDK body, silencing type mismatch; tighten when filter semantics land in 0005.
+- **ListRowsOptions type gap:** Resolved in 0005 (this slice). `ListRowsOptions.where` tightened to
+  `RowWhereInputDto` and `orderBy` to `OrderByDto[]` from `@revisium/client`. The blind `as` cast in
+  `client-transport.ts` is removed; `listRows` now constructs a well-typed `GetTableRowsDto` body.
+  Probe confirmed: `orderBy` by `createdAt` and `data.priority` work server-side; `where` with
+  `string_contains` and `id.equals` honored by the System API. `inspect-run.ts` uses `orderBy`
+  server-side; `run_id` exact equality is now also pushed server-side via
+  `{ data: { path: 'run_id', equals: runId } }` — confirmed working in PR #9 review (2026-06-02).
+  The prior in-process cap-filter for per-run reads is superseded; the cap warning is kept only for
+  the unscoped `listRuns` call.
