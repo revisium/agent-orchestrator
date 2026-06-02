@@ -1,3 +1,4 @@
+import type { RowWhereInputDto } from '@revisium/client';
 import type { ControlPlaneDataAccess, ControlPlaneRow } from '../control-plane/index.js';
 
 export type RunSummary = {
@@ -39,7 +40,7 @@ export type EventSummary = {
   stepId: string;
 };
 
-const IN_PROCESS_CAP = 500;
+const GLOBAL_CAP = 500;
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -104,17 +105,22 @@ function toEventSummary(row: ControlPlaneRow): EventSummary {
   };
 }
 
+// Prisma path+equals accepts scalar values; the SDK types equals as an object due to generated types.
+function runIdWhere(runId: string): RowWhereInputDto {
+  return { data: { path: 'run_id', equals: runId as unknown as Record<string, unknown> } };
+}
+
 export async function listRuns(
   da: ControlPlaneDataAccess,
   filter?: { status?: string; limit?: number },
 ): Promise<RunSummary[]> {
   await da.assertReady();
   const rows = await da.listRows('task_runs', {
-    first: IN_PROCESS_CAP,
+    first: GLOBAL_CAP,
     orderBy: [{ field: 'createdAt', direction: 'desc' }],
   });
-  if (rows.length === IN_PROCESS_CAP) {
-    process.stderr.write(`warning: task_runs results may be incomplete (cap=${IN_PROCESS_CAP})\n`);
+  if (rows.length === GLOBAL_CAP) {
+    process.stderr.write(`warning: task_runs results may be incomplete (cap=${GLOBAL_CAP})\n`);
   }
   let result = rows.map(toRunSummary);
   if (filter?.status) result = result.filter((r) => r.status === filter.status);
@@ -127,25 +133,23 @@ export async function showRun(da: ControlPlaneDataAccess, runId: string): Promis
   const runRow = await da.getRow('task_runs', runId);
   if (!runRow) return null;
 
-  const allTasks = await da.listRows('tasks', {
-    first: IN_PROCESS_CAP,
+  const where = runIdWhere(runId);
+
+  const tasks = await da.listRows('tasks', {
+    first: GLOBAL_CAP,
     orderBy: [{ field: 'createdAt', direction: 'asc' }],
+    where,
   });
-  if (allTasks.length === IN_PROCESS_CAP) {
-    process.stderr.write(`warning: tasks results may be incomplete (cap=${IN_PROCESS_CAP})\n`);
-  }
-  const tasks = allTasks.filter((t) => str(t.data.run_id) === runId);
+
+  const steps = await da.listRows('steps', {
+    first: GLOBAL_CAP,
+    orderBy: [{ field: 'createdAt', direction: 'asc' }],
+    where,
+  });
 
   const taskIds = new Set(tasks.map((t) => t.rowId));
-  const allSteps = await da.listRows('steps', {
-    first: IN_PROCESS_CAP,
-    orderBy: [{ field: 'createdAt', direction: 'asc' }],
-  });
-  if (allSteps.length === IN_PROCESS_CAP) {
-    process.stderr.write(`warning: steps results may be incomplete (cap=${IN_PROCESS_CAP})\n`);
-  }
   const stepsByTaskId = new Map<string, StepSummary[]>();
-  for (const step of allSteps) {
+  for (const step of steps) {
     const tid = str(step.data.task_id);
     if (!taskIds.has(tid)) continue;
     const list = stepsByTaskId.get(tid) ?? [];
@@ -165,14 +169,12 @@ export async function listRunEvents(
   filter?: { type?: string; limit?: number },
 ): Promise<EventSummary[]> {
   await da.assertReady();
-  const allEvents = await da.listRows('events', {
-    first: IN_PROCESS_CAP,
+  const rows = await da.listRows('events', {
+    first: GLOBAL_CAP,
     orderBy: [{ field: 'createdAt', direction: 'asc' }],
+    where: runIdWhere(runId),
   });
-  if (allEvents.length === IN_PROCESS_CAP) {
-    process.stderr.write(`warning: events results may be incomplete (cap=${IN_PROCESS_CAP})\n`);
-  }
-  let events = allEvents.filter((e) => str(e.data.run_id) === runId).map(toEventSummary);
+  let events = rows.map(toEventSummary);
   if (filter?.type) events = events.filter((e) => e.type === filter.type);
   if (filter?.limit !== undefined) events = events.slice(0, filter.limit);
   return events;
@@ -193,7 +195,7 @@ export function formatRunList(runs: RunSummary[]): string {
     pad('CREATED', COL.ts) +
     'TITLE';
   const lines = runs.map((r) => {
-    const ts = r.createdAt ? r.createdAt.slice(0, 20) + 'Z' : '';
+    const ts = r.createdAt ? r.createdAt.slice(0, 19) + 'Z' : '';
     return (
       pad(r.runId, COL.id) +
       pad(r.status, COL.status) +
@@ -208,7 +210,7 @@ export function formatRunList(runs: RunSummary[]): string {
 
 export function formatRunDetail(detail: RunDetail): string {
   const r = detail.run;
-  const ts = r.createdAt ? r.createdAt.slice(0, 20) + 'Z' : '';
+  const ts = r.createdAt ? r.createdAt.slice(0, 19) + 'Z' : '';
   const lines: string[] = [
     `run     ${r.runId}`,
     `status  ${r.status}`,
@@ -221,13 +223,17 @@ export function formatRunDetail(detail: RunDetail): string {
   lines.push('');
 
   for (const task of detail.tasks) {
-    lines.push(`  task     ${task.taskId}`);
-    lines.push(`  title    ${task.title}`);
-    lines.push(`  status   ${task.status}`);
-    lines.push(`  role     ${task.roleHint}`);
+    lines.push(
+      `  task     ${task.taskId}`,
+      `  title    ${task.title}`,
+      `  status   ${task.status}`,
+      `  role     ${task.roleHint}`,
+    );
     for (const step of task.steps) {
-      lines.push(`    step     ${step.stepId}`);
-      lines.push(`    role     ${step.role}  kind=${step.kind}  status=${step.status}  attempts=${step.attemptCount}/${step.maxAttempts}`);
+      lines.push(
+        `    step     ${step.stepId}`,
+        `    role     ${step.role}  kind=${step.kind}  status=${step.status}  attempts=${step.attemptCount}/${step.maxAttempts}`,
+      );
     }
     lines.push('');
   }
@@ -242,7 +248,7 @@ export function formatEventList(events: EventSummary[]): string {
     pad('ACTOR', COL.actor) +
     'CREATED';
   const lines = events.map((e) => {
-    const ts = e.createdAt ? e.createdAt.slice(0, 20) + 'Z' : '';
+    const ts = e.createdAt ? e.createdAt.slice(0, 19) + 'Z' : '';
     return (
       pad(e.eventId, COL.id) +
       pad(e.type, COL.type) +

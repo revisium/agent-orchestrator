@@ -112,6 +112,29 @@ if (runId) {
 JS
 ```
 
+**Result (confirmed in PR #9 review cycle, 2026-06-02):**
+
+Probe script `scripts/probe-server-filter.ts` confirmed:
+
+```
+where: { data: { path: 'run_id', equals: runId } }
+```
+
+returns ONLY rows matching `run_id`, scoped server-side. Cross-run isolation was verified: with 3 tasks
+across 3 different runs, the filter returned exactly 1 task for the target run. A non-existent run_id
+returned 0 rows. The same shape works for `steps` and `events`.
+
+The Prisma JSON path+equals filter accepts scalar values at runtime; the SDK-generated TypeScript type
+for `JsonFilterDto.equals` is `{ [key: string]: unknown }` (object-typed), so passing a string requires a
+targeted cast: `runId as unknown as Record<string, unknown>`. This is localized to a single helper
+function `runIdWhere()` in `inspect-run.ts` — the container `RowWhereInputDto` is explicitly typed.
+
+`showRun` (tasks + steps) and `listRunEvents` (events) now push the `run_id` predicate server-side.
+The prior in-process filter (cap-500, memory filter) is removed for per-run reads. The `GLOBAL_CAP`
+(500) is kept as the `first` limit for all reads, but the cap warning is now emitted only for the
+unscoped `listRuns` call — per-run reads are server-side scoped so the cap no longer risks silent
+cross-run data loss.
+
 If System API honors `where` and `orderBy`, push filters into `listRows`.
 If it rejects or ignores them, filter/sort in process with a cap (for example 500) and report the cap.
 
@@ -355,4 +378,7 @@ Open findings:
   `client-transport.ts` is removed; `listRows` now constructs a well-typed `GetTableRowsDto` body.
   Probe confirmed: `orderBy` by `createdAt` and `data.priority` work server-side; `where` with
   `string_contains` and `id.equals` honored by the System API. `inspect-run.ts` uses `orderBy`
-  server-side and in-process filtering (cap: 500) for `run_id` exact equality.
+  server-side; `run_id` exact equality is now also pushed server-side via
+  `{ data: { path: 'run_id', equals: runId } }` — confirmed working in PR #9 review (2026-06-02).
+  The prior in-process cap-filter for per-run reads is superseded; the cap warning is kept only for
+  the unscoped `listRuns` call.

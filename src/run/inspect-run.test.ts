@@ -18,7 +18,12 @@ type TableStore = {
 
 function createFakeDataAccess(
   store: Partial<TableStore> = {},
-  options: { assertReadyError?: Error; writes?: string[]; calls?: string[] } = {},
+  options: {
+    assertReadyError?: Error;
+    writes?: string[];
+    calls?: string[];
+    listRowsArgs?: Array<[RuntimeTable, ListRowsOptions | undefined]>;
+  } = {},
 ): ControlPlaneDataAccess {
   const tables: TableStore = {
     task_runs: [],
@@ -36,12 +41,24 @@ function createFakeDataAccess(
 
     async listRows(table: RuntimeTable, listOptions?: ListRowsOptions) {
       options.calls?.push(`listRows:${table}`);
-      const rows = tables[table] ?? [];
+      options.listRowsArgs?.push([table, listOptions]);
+      let rows = tables[table] ?? [];
+
+      // Apply where: { data: { path, equals } } filter (mirrors Prisma JSON path equality)
+      const whereData = listOptions?.where?.data;
+      if (whereData?.path !== undefined && whereData.equals !== undefined) {
+        const path = whereData.path as string;
+        const equals = whereData.equals;
+        rows = rows.filter((r) => r.data[path] === equals);
+      }
+
       const orderBy = listOptions?.orderBy?.[0];
-      if (!orderBy || orderBy.field !== 'createdAt') return rows;
+      if (orderBy?.field !== 'createdAt') {
+        return rows.slice(0, listOptions?.first ?? rows.length);
+      }
       const sorted = [...rows].sort((a, b) => {
-        const ta = String(a.data.created_at ?? a.createdAt ?? '');
-        const tb = String(b.data.created_at ?? b.createdAt ?? '');
+        const ta = (typeof a.data.created_at === 'string' ? a.data.created_at : a.createdAt) ?? '';
+        const tb = (typeof b.data.created_at === 'string' ? b.data.created_at : b.createdAt) ?? '';
         return orderBy.direction === 'desc' ? tb.localeCompare(ta) : ta.localeCompare(tb);
       });
       const first = listOptions?.first ?? sorted.length;
@@ -190,6 +207,43 @@ test('showRun tasks for different run contain only their steps', async () => {
   assert.equal(detail.tasks[0]?.steps[0]?.stepId, 'step-b');
 });
 
+test('showRun passes run_id where predicate to tasks and steps listRows', async () => {
+  const listRowsArgs: Array<[RuntimeTable, ListRowsOptions | undefined]> = [];
+  const da = createFakeDataAccess({
+    task_runs: [RUN_A],
+    tasks: [TASK_A],
+    steps: [STEP_A],
+  }, { listRowsArgs });
+
+  await showRun(da, 'run-a');
+
+  const tasksCall = listRowsArgs.find(([t]) => t === 'tasks');
+  assert.ok(tasksCall, 'listRows called for tasks');
+  assert.equal(tasksCall[1]?.where?.data?.path, 'run_id');
+  assert.equal(tasksCall[1]?.where?.data?.equals as unknown as string, 'run-a');
+
+  const stepsCall = listRowsArgs.find(([t]) => t === 'steps');
+  assert.ok(stepsCall, 'listRows called for steps');
+  assert.equal(stepsCall[1]?.where?.data?.path, 'run_id');
+  assert.equal(stepsCall[1]?.where?.data?.equals as unknown as string, 'run-a');
+});
+
+test('showRun does not return tasks or steps from other runs', async () => {
+  const da = createFakeDataAccess({
+    task_runs: [RUN_A, RUN_B],
+    tasks: [TASK_A, TASK_B],
+    steps: [STEP_A, STEP_B],
+  });
+
+  const detail = await showRun(da, 'run-a');
+
+  assert.ok(detail !== null);
+  assert.equal(detail.tasks.length, 1, 'only run-a tasks returned');
+  assert.equal(detail.tasks[0]?.taskId, 'task-a');
+  const allStepIds = detail.tasks.flatMap((t) => t.steps.map((s) => s.stepId));
+  assert.deepEqual(allStepIds, ['step-a'], 'only run-a steps returned');
+});
+
 test('showRun calls assertReady', async () => {
   const da = createFakeDataAccess({}, { assertReadyError: new Error('down') });
   await assert.rejects(() => showRun(da, 'run-a'), /down/);
@@ -235,6 +289,27 @@ test('listRunEvents calls assertReady', async () => {
   await assert.rejects(() => listRunEvents(da, 'run-a'), /down/);
 });
 
+test('listRunEvents passes run_id where predicate to events listRows', async () => {
+  const listRowsArgs: Array<[RuntimeTable, ListRowsOptions | undefined]> = [];
+  const da = createFakeDataAccess({ events: [EVENT_A1, EVENT_A2] }, { listRowsArgs });
+
+  await listRunEvents(da, 'run-a');
+
+  const eventsCall = listRowsArgs.find(([t]) => t === 'events');
+  assert.ok(eventsCall, 'listRows called for events');
+  assert.equal(eventsCall[1]?.where?.data?.path, 'run_id');
+  assert.equal(eventsCall[1]?.where?.data?.equals as unknown as string, 'run-a');
+});
+
+test('listRunEvents does not return events from other runs', async () => {
+  const da = createFakeDataAccess({ events: [EVENT_A1, EVENT_A2, EVENT_B] });
+
+  const events = await listRunEvents(da, 'run-a');
+
+  assert.equal(events.length, 2, 'only run-a events returned');
+  assert.ok(events.every((e) => e.eventId.startsWith('event-a')));
+});
+
 // ─────────────────────── no writes ───────────────────────
 
 test('all inspect functions record zero writes', async () => {
@@ -274,6 +349,13 @@ test('formatRunList shows plural summary for multiple runs', () => {
   assert.ok(formatRunList(runs).includes('(2 runs)'));
 });
 
+test('formatRunList timestamp has no stray dot', () => {
+  const runs = [{ runId: 'run-1', title: 'T', status: 'ready', priority: 0, createdAt: '2026-06-01T00:00:00.000Z' }];
+  const output = formatRunList(runs);
+  assert.ok(!output.includes('.Z'), 'no stray dot before Z');
+  assert.ok(output.includes('2026-06-01T00:00:00Z'), 'correct timestamp format');
+});
+
 test('formatRunDetail includes run id, tasks, and step details', () => {
   const detail = {
     run: { runId: 'run-a', title: 'My run', status: 'ready', priority: 1, createdAt: '2026-06-01T00:00:00.000Z', description: 'desc', scope: 'sc', repos: ['repo1'] },
@@ -292,6 +374,16 @@ test('formatRunDetail includes run id, tasks, and step details', () => {
   assert.ok(output.includes('repo1'));
 });
 
+test('formatRunDetail timestamp has no stray dot', () => {
+  const detail = {
+    run: { runId: 'run-a', title: 'T', status: 'ready', priority: 0, createdAt: '2026-06-01T00:00:00.000Z', description: '', scope: '', repos: [] },
+    tasks: [],
+  };
+  const output = formatRunDetail(detail);
+  assert.ok(!output.includes('.Z'), 'no stray dot before Z');
+  assert.ok(output.includes('2026-06-01T00:00:00Z'), 'correct timestamp format');
+});
+
 test('formatEventList produces header, one row per event, and count summary', () => {
   const events = [
     { eventId: 'event_20260601T000000000Z_run_ab12cd34_created', type: 'run_created', actor: 'cli', createdAt: '2026-06-01T00:00:00.000Z', taskId: 'task-a', stepId: 'step-a' },
@@ -301,6 +393,13 @@ test('formatEventList produces header, one row per event, and count summary', ()
   assert.ok(output.includes('run_created'), 'has type');
   assert.ok(output.includes('cli'), 'has actor');
   assert.ok(output.includes('(1 event)'), 'has summary');
+});
+
+test('formatEventList timestamp has no stray dot', () => {
+  const events = [{ eventId: 'event-1', type: 'run_created', actor: 'cli', createdAt: '2026-06-01T00:00:00.000Z', taskId: 'task-a', stepId: 'step-a' }];
+  const output = formatEventList(events);
+  assert.ok(!output.includes('.Z'), 'no stray dot before Z');
+  assert.ok(output.includes('2026-06-01T00:00:00Z'), 'correct timestamp format');
 });
 
 // ─────────────────────── cap warnings ───────────────────────
@@ -325,35 +424,16 @@ test('listRuns does NOT warn when results are below the cap', async () => {
   assert.equal(msgs.length, 0);
 });
 
-test('showRun emits stderr warning for tasks when tasks reach the cap', async () => {
+test('showRun never emits cap warning for tasks or steps', async () => {
   const capTasks = makeCapRows('task', CAP).map((r) => ({ ...r, data: { ...r.data, run_id: 'run-a' } }));
   const da = createFakeDataAccess({ task_runs: [RUN_A], tasks: capTasks });
-  const msgs = await captureStderr(() => showRun(da, 'run-a'));
-  assert.ok(msgs.some((m) => m.includes('incomplete') && m.includes(String(CAP))));
-});
-
-test('showRun does NOT warn when tasks are below the cap', async () => {
-  const da = createFakeDataAccess({ task_runs: [RUN_A], tasks: [TASK_A], steps: [STEP_A] });
   const msgs = await captureStderr(() => showRun(da, 'run-a'));
   assert.equal(msgs.length, 0);
 });
 
-test('showRun emits stderr warning for steps when steps reach the cap', async () => {
-  const capSteps = makeCapRows('step', CAP).map((r) => ({ ...r, data: { ...r.data, task_id: 'task-a' } }));
-  const da = createFakeDataAccess({ task_runs: [RUN_A], tasks: [TASK_A], steps: capSteps });
-  const msgs = await captureStderr(() => showRun(da, 'run-a'));
-  assert.ok(msgs.some((m) => m.includes('incomplete') && m.includes(String(CAP))));
-});
-
-test('listRunEvents emits stderr warning when events reach the cap', async () => {
+test('listRunEvents never emits cap warning for events', async () => {
   const capEvents = makeCapRows('event', CAP).map((r) => ({ ...r, data: { ...r.data, run_id: 'run-a' } }));
   const da = createFakeDataAccess({ events: capEvents });
-  const msgs = await captureStderr(() => listRunEvents(da, 'run-a'));
-  assert.ok(msgs.some((m) => m.includes('incomplete') && m.includes(String(CAP))));
-});
-
-test('listRunEvents does NOT warn when events are below the cap', async () => {
-  const da = createFakeDataAccess({ events: [EVENT_A1, EVENT_A2] });
   const msgs = await captureStderr(() => listRunEvents(da, 'run-a'));
   assert.equal(msgs.length, 0);
 });
