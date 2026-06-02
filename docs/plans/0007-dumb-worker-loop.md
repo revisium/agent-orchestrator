@@ -359,7 +359,7 @@ npm run smoke:worker-loop
 ## 8. Final acceptance test
 
 ```bash
-cd /Users/anton/projects/revisium/agent-orchestrator
+cd "$(git rev-parse --show-toplevel)"
 ./bin/revo.js revisium stop
 rm -rf ~/.revisium-orchestrator
 npm install
