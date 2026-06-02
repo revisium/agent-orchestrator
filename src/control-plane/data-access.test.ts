@@ -76,11 +76,11 @@ test('list rows passes options and maps response to ControlPlaneRow', async () =
     edges: [{ node: fakeTransportRow('run-1', { id: 'run-1', title: 'Run' }) }],
   }));
 
-  const rows = await access.listRows('task_runs', { first: 1, where: { data: { path: 'status', eq: 'pending' } } });
+  const rows = await access.listRows('task_runs', { first: 1, where: { id: { equals: 'run-1' } } });
 
   assert.equal(calls[0]?.method, 'listRows');
   assert.equal(calls[0]?.table, 'task_runs');
-  assert.deepEqual(calls[0]?.options, { first: 1, where: { data: { path: 'status', eq: 'pending' } } });
+  assert.deepEqual(calls[0]?.options, { first: 1, where: { id: { equals: 'run-1' } } });
   assert.deepEqual(rows[0]?.data, { id: 'run-1', title: 'Run' });
 });
 

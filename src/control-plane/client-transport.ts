@@ -1,5 +1,5 @@
 import { RevisiumClient, sdk } from '@revisium/client';
-import type { Client } from '@revisium/client';
+import type { Client, GetTableRowsDto } from '@revisium/client';
 import { baseUrl, getConfig, isAlive, isHealthy, readRuntime } from '../config.js';
 import { ControlPlaneError } from './errors.js';
 import { runtimeTables } from './tables.js';
@@ -144,7 +144,12 @@ export function createClientTransport(mode: RevisionMode): ControlPlaneTransport
 
   async function listRows(table: string, options?: ListRowsOptions): Promise<TransportList> {
     const { revisionId, client } = await resolveScope();
-    const body = { first: 100, ...options } as Parameters<typeof sdk.rows>[0]['body'];
+    const body: GetTableRowsDto = {
+      first: options?.first ?? 100,
+      after: options?.after,
+      where: options?.where,
+      orderBy: options?.orderBy,
+    };
     const result = await sdk.rows({ client, path: { revisionId, tableId: table }, body });
     if (result.error) throw mapApiError(result.error, `${table}/rows`);
     const edges = (result.data?.edges ?? []).map((e: { node: { id: string; data: Record<string, unknown>; readonly?: boolean; createdAt?: string; updatedAt?: string } }) => ({ node: toTransportRow(e.node) }));

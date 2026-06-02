@@ -345,11 +345,14 @@ Open findings:
 
 ### Inherited from 0004 review
 
-- **getScope() scope per call:** `getScope()` rebuilds the client and makes 2 extra round-trips
-  (`fetchHead` / `fetchDraft`) on every transport method call; one `getRow` = 3 HTTP calls. Memoize
-  the scope per transport instance.
-- **updateRow/patchRow non-null assertion:** `updateRow` and `patchRow` use `result.data!.row!` double
-  non-null, but `row?` is optional in those response types — guard and raise
+- **getScope() scope per call:** Resolved in 0004 (#8). `getScope()` is now memoized per transport
+  instance via `cachedScope`; the scope is resolved once and reused across all method calls.
+- **updateRow/patchRow non-null assertion:** Resolved in 0004 (#8). `updateRow` and `patchRow` now
+  call `extractMutationRow(result)` which guards `result.data?.row` and raises
   `HTTP_ERROR('Malformed response')` instead of letting a `TypeError` escape.
-- **ListRowsOptions type gap:** `ListRowsOptions.where` / `orderBy` are `Record<string,unknown>` cast
-  with `as` into the SDK body, silencing type mismatch; tighten when filter semantics land in 0005.
+- **ListRowsOptions type gap:** Resolved in 0005 (this slice). `ListRowsOptions.where` tightened to
+  `RowWhereInputDto` and `orderBy` to `OrderByDto[]` from `@revisium/client`. The blind `as` cast in
+  `client-transport.ts` is removed; `listRows` now constructs a well-typed `GetTableRowsDto` body.
+  Probe confirmed: `orderBy` by `createdAt` and `data.priority` work server-side; `where` with
+  `string_contains` and `id.equals` honored by the System API. `inspect-run.ts` uses `orderBy`
+  server-side and in-process filtering (cap: 500) for `run_id` exact equality.

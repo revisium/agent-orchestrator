@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { ControlPlaneError, createControlPlaneDataAccess } from '../../control-plane/index.js';
 import { createRunWorkflow, CreateRunWorkflowError } from '../../run/create-run.js';
+import { listRuns, showRun, listRunEvents, formatRunList, formatRunDetail, formatEventList } from '../../run/inspect-run.js';
 
 type CreateOptions = {
   title: string;
@@ -8,6 +9,22 @@ type CreateOptions = {
   description?: string;
   scope?: string;
   priority: string;
+};
+
+type ListOptions = {
+  status?: string;
+  limit?: string;
+  json: boolean;
+};
+
+type ShowOptions = {
+  json: boolean;
+};
+
+type EventsOptions = {
+  type?: string;
+  limit?: string;
+  json: boolean;
 };
 
 function formatCause(error: unknown): string {
@@ -72,6 +89,94 @@ async function createRun(options: CreateOptions): Promise<void> {
   }
 }
 
+function parseLimit(value: string | undefined, flag: string): number | undefined {
+  if (value === undefined) return undefined;
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+    throw new Error(`Invalid ${flag}: ${value} (must be a positive integer)`);
+  }
+  return n;
+}
+
+async function runList(options: ListOptions): Promise<void> {
+  try {
+    const limit = parseLimit(options.limit, '--limit');
+    const da = createControlPlaneDataAccess();
+    const runs = await listRuns(da, { status: options.status, limit });
+    if (options.json) {
+      process.stdout.write(JSON.stringify(runs, null, 2) + '\n');
+    } else {
+      console.log(formatRunList(runs));
+    }
+  } catch (error) {
+    if (error instanceof ControlPlaneError) {
+      console.error(`Error: ${formatCause(error)}`);
+      printHint(error, false);
+    } else if (error instanceof Error) {
+      console.error(`Error: ${error.message}`);
+    } else {
+      console.error(`Error: ${String(error)}`);
+    }
+    process.exitCode = 1;
+  }
+}
+
+async function runShow(runId: string, options: ShowOptions): Promise<void> {
+  try {
+    const da = createControlPlaneDataAccess();
+    const detail = await showRun(da, runId);
+    if (!detail) {
+      console.error(`run not found: ${runId}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (options.json) {
+      process.stdout.write(JSON.stringify(detail, null, 2) + '\n');
+    } else {
+      console.log(formatRunDetail(detail));
+    }
+  } catch (error) {
+    if (error instanceof ControlPlaneError) {
+      console.error(`Error: ${formatCause(error)}`);
+      printHint(error, false);
+    } else if (error instanceof Error) {
+      console.error(`Error: ${error.message}`);
+    } else {
+      console.error(`Error: ${String(error)}`);
+    }
+    process.exitCode = 1;
+  }
+}
+
+async function runEvents(runId: string, options: EventsOptions): Promise<void> {
+  try {
+    const limit = parseLimit(options.limit, '--limit');
+    const da = createControlPlaneDataAccess();
+    const runRow = await da.getRow('task_runs', runId);
+    if (!runRow) {
+      console.error(`run not found: ${runId}`);
+      process.exitCode = 1;
+      return;
+    }
+    const events = await listRunEvents(da, runId, { type: options.type, limit });
+    if (options.json) {
+      process.stdout.write(JSON.stringify(events, null, 2) + '\n');
+    } else {
+      console.log(formatEventList(events));
+    }
+  } catch (error) {
+    if (error instanceof ControlPlaneError) {
+      console.error(`Error: ${formatCause(error)}`);
+      printHint(error, false);
+    } else if (error instanceof Error) {
+      console.error(`Error: ${error.message}`);
+    } else {
+      console.error(`Error: ${String(error)}`);
+    }
+    process.exitCode = 1;
+  }
+}
+
 export function registerRun(program: Command): void {
   const run = program.command('run').description('Manage orchestrator runs');
 
@@ -83,4 +188,28 @@ export function registerRun(program: Command): void {
     .option('--scope <text>', 'Run scope')
     .option('--priority <n>', 'Run priority', '0')
     .action(createRun);
+
+  run
+    .command('list')
+    .description('List runs')
+    .option('--status <status>', 'Filter by status')
+    .option('--limit <n>', 'Maximum number of results')
+    .option('--json', 'Output as JSON', false)
+    .action(runList);
+
+  run
+    .command('show')
+    .description('Show run details')
+    .argument('<runId>', 'Run ID')
+    .option('--json', 'Output as JSON', false)
+    .action(runShow);
+
+  run
+    .command('events')
+    .description('List events for a run')
+    .argument('<runId>', 'Run ID')
+    .option('--type <type>', 'Filter by event type')
+    .option('--limit <n>', 'Maximum number of results')
+    .option('--json', 'Output as JSON', false)
+    .action(runEvents);
 }
