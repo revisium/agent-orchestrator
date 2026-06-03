@@ -68,10 +68,13 @@ export type WorkerOptions = {
   signal?: AbortSignal;
 };
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
     const onAbort = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
@@ -86,6 +89,12 @@ async function parkForHuman(
   const nowIso = now.toISOString();
   const st = compactStamp(now);
   const sfx = randomUUID().replaceAll('-', '').slice(0, 8);
+
+  // Close the attempt so it is no longer 'running' while the step waits for a human.
+  await da.patchRow('attempts', attemptId, [
+    { op: 'replace', path: 'status', value: 'paused' },
+    { op: 'replace', path: 'finished_at', value: nowIso },
+  ]);
 
   // Minimal inbox parking: mark step awaiting_approval, clear lease, append event.
   // Full pushInbox (inbox row creation + resolution workflow) is deferred.

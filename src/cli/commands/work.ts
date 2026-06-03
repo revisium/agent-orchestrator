@@ -22,10 +22,10 @@ function formatCause(error: unknown): string {
 
 function printHint(error: ControlPlaneError): void {
   if (error.code === 'DAEMON_NOT_RUNNING') {
-    console.error('Run: ./bin/revo.js revisium start');
+    console.error('Run: revo revisium start');
   }
   if (error.code === 'BOOTSTRAP_NOT_APPLIED') {
-    console.error('Run: ./bin/revo.js bootstrap --commit');
+    console.error('Run: revo bootstrap --commit');
   }
 }
 

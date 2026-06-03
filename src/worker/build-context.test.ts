@@ -1,13 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildContext } from './build-context.js';
-import type { ControlPlaneDataAccess, ControlPlaneRow, ListRowsOptions } from '../control-plane/data-access.js';
+import type { ControlPlaneDataAccess, ListRowsOptions } from '../control-plane/data-access.js';
 import type { Step } from '../control-plane/steps.js';
 import type { Role } from '../control-plane/definitions.js';
-
-function fakeRow(rowId: string, data: Record<string, unknown>): ControlPlaneRow {
-  return { rowId, data };
-}
+import { fakeRow, makeRole, BASE_STEP } from './test-fixtures.js';
 
 function makeDA(opts: {
   task?: Record<string, unknown>;
@@ -42,34 +39,9 @@ function makeDA(opts: {
   };
 }
 
-const ROLE: Role = {
-  name: 'architect',
-  systemPrompt: 'You are the architect.',
-  modelLevel: 'standard',
-  effort: 'high',
-  runner: 'claude-code',
-  allowedTools: [],
-  scopeRules: { allow: ['src'] },
-};
+const ROLE: Role = makeRole('architect', { scopeRules: { allow: ['src'] } });
 
-const STEP: Step = {
-  id: 'step-1',
-  taskId: 'task-1',
-  runId: 'run-1',
-  role: 'architect',
-  kind: 'plan_run',
-  status: 'claimed',
-  input: { title: 'Add feature X' },
-  output: null,
-  modelProfile: 'standard',
-  runAfter: '',
-  attemptCount: 0,
-  maxAttempts: 3,
-  priority: 0,
-  leaseOwner: 'worker-1',
-  leaseExpiresAt: '',
-  deadReason: '',
-};
+const STEP: Step = { ...BASE_STEP, input: { title: 'Add feature X' } };
 
 test('buildContext: includes role name and system prompt', async () => {
   const da = makeDA({});

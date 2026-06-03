@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadRole, loadModelProfile } from './definitions.js';
+import { ControlPlaneError } from './errors.js';
 import type { ControlPlaneTransport } from './client-transport.js';
 
 function makeTransport(rows: Record<string, Record<string, unknown>>): ControlPlaneTransport {
@@ -133,5 +134,29 @@ test('loadModelProfile: throws ROW_NOT_FOUND when row is missing', async () => {
       const e = err as { statusCode?: number };
       return e.statusCode === 404;
     },
+  );
+});
+
+test('loadRole: throws VALIDATION_FAILURE for invalid model_level', async () => {
+  const transport = makeTransport({
+    'roles/bad-role': {
+      id: 'bad-role',
+      name: 'bad-role',
+      system_prompt: 'Bad.',
+      model_level: 'ultra-expensive',
+      effort: 'low',
+      runner: 'claude-code',
+      allowed_tools: [],
+      scope_rules: '',
+      updated_at: '2026-06-03T00:00:00.000Z',
+    },
+  });
+
+  await assert.rejects(
+    () => loadRole('bad-role', transport),
+    (err: unknown) =>
+      err instanceof ControlPlaneError &&
+      err.code === 'VALIDATION_FAILURE' &&
+      err.message.includes('ultra-expensive'),
   );
 });

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getConfig } from '../config.js';
@@ -14,6 +14,7 @@ export function resolveWorkerId(override?: string, testDataDir?: string): string
   }
 
   const id = `worker-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  mkdirSync(dataDir, { recursive: true });
   writeFileSync(idFile, id, 'utf8');
   return id;
 }

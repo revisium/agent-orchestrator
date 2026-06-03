@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { createControlPlaneDataAccess } from '../src/control-plane/index.js';
 import { loadRole, loadModelProfile } from '../src/control-plane/definitions.js';
-import { claimNextStep, startAttempt } from '../src/control-plane/steps.js';
+import { startAttempt, type Step } from '../src/control-plane/steps.js';
 
 const require = createRequire(import.meta.url);
 const tsxPackagePath = require.resolve('tsx/package.json');
@@ -37,6 +37,17 @@ function matchId(output: string, pattern: RegExp, label: string): string {
 }
 
 const da = createControlPlaneDataAccess();
+
+async function pollUntilSucceeded(stepId: string, label: string, workerId = 'smoke-worker'): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const result = await runCli(['work', '--once', '--worker-id', workerId]);
+    if (result.status !== 0) throw new Error(`revo work --once failed (${label}):\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    const row = await da.getRow('steps', stepId);
+    if (row?.data.status === 'succeeded') return;
+  }
+  const row = await da.getRow('steps', stepId);
+  throw new Error(`Expected ${label} step succeeded after work, got ${String(row?.data.status)}`);
+}
 await da.assertReady();
 
 // ─── Smoke 1: verify loadRole/loadModelProfile read from committed head ───────
@@ -66,17 +77,7 @@ console.log(`smoke2a: run=${runId} task=${taskId} archStep=${archStepId}`);
 
 // Run work --once up to 3 times: earlier smokes may leave ready steps in the queue.
 // The loop is dumb — it claims by priority/age, so older steps may come first.
-let archProcessed = false;
-for (let attempt = 0; attempt < 3; attempt++) {
-  const workResult1 = await runCli(['work', '--once', '--worker-id', 'smoke-worker']);
-  if (workResult1.status !== 0) throw new Error(`revo work --once failed (pass 1):\nstdout:\n${workResult1.stdout}\nstderr:\n${workResult1.stderr}`);
-  const archStepRow = await da.getRow('steps', archStepId);
-  if (archStepRow?.data.status === 'succeeded') { archProcessed = true; break; }
-}
-if (!archProcessed) {
-  const archStepRow = await da.getRow('steps', archStepId);
-  throw new Error(`Expected architect step succeeded after work, got ${String(archStepRow?.data.status)}`);
-}
+await pollUntilSucceeded(archStepId, 'architect step (pass 1)');
 
 // A developer step should have been created
 const allSteps = await da.listRows('steps');
@@ -91,17 +92,7 @@ console.log(`smoke2b: architect step succeeded, developer step created=${devStep
 
 // ─── Smoke 3: developer step → no more steps ───────────────────────────────────
 
-let devProcessed = false;
-for (let attempt = 0; attempt < 3; attempt++) {
-  const workResult2 = await runCli(['work', '--once', '--worker-id', 'smoke-worker']);
-  if (workResult2.status !== 0) throw new Error(`revo work --once failed (pass 2):\nstdout:\n${workResult2.stdout}\nstderr:\n${workResult2.stderr}`);
-  const devStepRow = await da.getRow('steps', devStepId);
-  if (devStepRow?.data.status === 'succeeded') { devProcessed = true; break; }
-}
-if (!devProcessed) {
-  const devStepRow = await da.getRow('steps', devStepId);
-  throw new Error(`Expected developer step succeeded after work, got ${String(devStepRow?.data.status)}`);
-}
+await pollUntilSucceeded(devStepId, 'developer step (pass 2)');
 
 // No additional steps should have been created for this run (developer returns none)
 const allStepsAfter = await da.listRows('steps');
@@ -124,13 +115,42 @@ if (createResult2.status !== 0) throw new Error(`revo run create (recovery) fail
 const runId2 = matchId(createResult2.stdout, /^created run (\S+)$/m, 'run id');
 const archStepId2 = matchId(createResult2.stdout, /^step (\S+) ready$/m, 'step id');
 
-// Simulate crash: directly claim+start the specific step without writing result.
-// We use the crash worker id to scope recovery correctly.
+// Simulate crash: directly claim+start archStepId2 without writing result.
+// Scoped to the specific step created above so recovery is genuinely exercised.
 const crashWorkerId = `smoke-crash-worker-${Date.now()}`;
-const crashStep = await claimNextStep(da, crashWorkerId, ['architect']);
-if (!crashStep) throw new Error('Expected a claimable architect step for recovery smoke');
-// There may be steps from earlier in this smoke or from earlier smoke runs; accept any.
-const crashStepId = crashStep.id;
+
+const archRow2 = await da.getRow('steps', archStepId2);
+if (!archRow2) throw new Error(`Expected step ${archStepId2} to exist before simulated crash`);
+
+const claimTime = new Date();
+const claimNowIso = claimTime.toISOString();
+const leaseExpiresAt = new Date(claimTime.getTime() + 30_000).toISOString();
+await da.patchRow('steps', archStepId2, [
+  { op: 'replace', path: 'status', value: 'claimed' },
+  { op: 'replace', path: 'lease_owner', value: crashWorkerId },
+  { op: 'replace', path: 'lease_expires_at', value: leaseExpiresAt },
+  { op: 'replace', path: 'updated_at', value: claimNowIso },
+]);
+
+const crashStep: Step = {
+  id: archStepId2,
+  taskId: String(archRow2.data.task_id ?? ''),
+  runId: runId2,
+  role: String(archRow2.data.role ?? 'architect'),
+  kind: String(archRow2.data.kind ?? 'plan_run'),
+  status: 'claimed',
+  input: archRow2.data.input ?? null,
+  output: null,
+  modelProfile: String(archRow2.data.model_profile ?? 'standard'),
+  runAfter: String(archRow2.data.run_after ?? ''),
+  attemptCount: Number(archRow2.data.attempt_count ?? 0),
+  maxAttempts: Number(archRow2.data.max_attempts ?? 3),
+  priority: Number(archRow2.data.priority ?? 0),
+  leaseOwner: crashWorkerId,
+  leaseExpiresAt,
+  deadReason: '',
+};
+const crashStepId = archStepId2;
 
 await startAttempt(da, crashStep, { workerId: crashWorkerId });
 

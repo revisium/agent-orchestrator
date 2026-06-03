@@ -5,6 +5,19 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveWorkerId } from './worker-id.js';
 
+test('resolveWorkerId: creates dataDir if it does not exist', () => {
+  const parentDir = mkdtempSync(join(tmpdir(), 'test-worker-id-parent-'));
+  const dir = join(parentDir, 'nested', 'data');
+  try {
+    const id = resolveWorkerId(undefined, dir);
+    assert.ok(id.startsWith('worker-'), 'id should start with worker-');
+    assert.ok(existsSync(join(dir, 'worker-id')), 'worker-id file should exist in created dir');
+    assert.equal(readFileSync(join(dir, 'worker-id'), 'utf8').trim(), id);
+  } finally {
+    rmSync(parentDir, { recursive: true });
+  }
+});
+
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'test-worker-id-'));
 }

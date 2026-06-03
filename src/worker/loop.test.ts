@@ -1,15 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runWorker, type WorkerDeps, type WorkerOptions } from './loop.js';
+import { getEventListeners } from 'node:events';
+import { runWorker, sleep, type WorkerDeps, type WorkerOptions } from './loop.js';
 import type { ControlPlaneDataAccess, ControlPlaneRow, ListRowsOptions, PatchOperation } from '../control-plane/data-access.js';
-import type { Role, ModelProfile } from '../control-plane/definitions.js';
 import type { AttemptResult, NewStepSpec } from './runner.js';
+import { fakeRow, makeRole, TEST_PROFILE } from './test-fixtures.js';
 
 // ─── tracked fake DA ─────────────────────────────────────────────────────────
-
-function fakeRow(rowId: string, data: Record<string, unknown>): ControlPlaneRow {
-  return { rowId, data, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
-}
 
 function createTrackedDA(opLog: string[]) {
   const store = new Map<string, Map<string, ControlPlaneRow>>();
@@ -106,21 +103,13 @@ function createTrackedDA(opLog: string[]) {
 
 // ─── factory helpers ─────────────────────────────────────────────────────────
 
-function makeRole(name: string): Role {
-  return { name, systemPrompt: `You are the ${name}.`, modelLevel: 'standard', effort: 'high', runner: 'claude-code', allowedTools: [], scopeRules: {} };
-}
-
-const PROFILE: ModelProfile = {
-  level: 'standard', provider: 'test', modelId: 'test-model', params: {}, costPerInput: 0, costPerOutput: 0,
-};
-
-function makeDeps(opLog: string[], agentResult: (role: Role) => AttemptResult) {
+function makeDeps(opLog: string[], agentResult: (role: ReturnType<typeof makeRole>) => AttemptResult) {
   const tracked = createTrackedDA(opLog);
 
   const deps: WorkerDeps = {
     da: tracked.da,
     loadRole: async (name) => { opLog.push(`loadRole:${name}`); return makeRole(name); },
-    loadModelProfile: async (level) => { opLog.push(`loadModelProfile:${level}`); return PROFILE; },
+    loadModelProfile: async (level) => { opLog.push(`loadModelProfile:${level}`); return TEST_PROFILE; },
     runAgent: async ({ role }) => { opLog.push('runAgent'); return agentResult(role); },
   };
 
@@ -244,6 +233,11 @@ test('loop: needsHuman parks step and creates no next steps', async () => {
   const stepRow = tracked.getRowDirect('steps', 'step-1');
   assert.equal(stepRow?.data.status, 'awaiting_approval', 'step should be awaiting_approval');
   assert.equal(stepRow?.data.lease_owner, '', 'lease should be cleared');
+
+  // Attempt must not be left 'running' after park
+  const attemptRows = tracked.rows('attempts');
+  assert.equal(attemptRows.length, 1, 'exactly one attempt row should exist');
+  assert.equal(attemptRows[0]?.data.status, 'paused', 'attempt should be paused after needsHuman park');
 });
 
 // ─── once returns on idle ─────────────────────────────────────────────────────
@@ -256,4 +250,17 @@ test('loop: once returns immediately when no step is claimable', async () => {
   await runWorker(deps, ONCE_OPTS);
 
   assert.ok(!opLog.includes('runAgent'), 'runAgent must not be called when no step is claimable');
+});
+
+// ─── sleep abort-listener not accumulated ─────────────────────────────────────
+
+test('sleep: abort listeners are cleaned up after normal timer completion', async () => {
+  const ctrl = new AbortController();
+
+  for (let i = 0; i < 20; i++) {
+    await sleep(0, ctrl.signal);
+  }
+
+  const listeners = getEventListeners(ctrl.signal, 'abort');
+  assert.equal(listeners.length, 0, `Expected 0 abort listeners after 20 completed sleeps, got ${listeners.length}`);
 });

@@ -1,3 +1,4 @@
+import { ControlPlaneError } from './errors.js';
 import { createClientTransport, type ControlPlaneTransport } from './client-transport.js';
 
 export type Role = {
@@ -19,6 +20,19 @@ export type ModelProfile = {
   costPerOutput: number;
 };
 
+const VALID_MODEL_LEVELS = ['cheap', 'standard', 'deep'] as const;
+
+function toModelLevel(raw: unknown): Role['modelLevel'] {
+  const s = toStr(raw) || 'standard';
+  if (!(VALID_MODEL_LEVELS as readonly string[]).includes(s)) {
+    throw new ControlPlaneError(
+      'VALIDATION_FAILURE',
+      `Invalid model_level "${s}": expected one of ${VALID_MODEL_LEVELS.join(', ')}`,
+    );
+  }
+  return s as Role['modelLevel'];
+}
+
 function toStr(v: unknown): string {
   if (typeof v === 'string') return v;
   if (typeof v === 'number') return String(v);
@@ -38,7 +52,7 @@ export async function loadRole(name: string, transport?: ControlPlaneTransport):
   return {
     name: toStr(d.name) || name,
     systemPrompt: toStr(d.system_prompt),
-    modelLevel: (toStr(d.model_level) || 'standard') as Role['modelLevel'],
+    modelLevel: toModelLevel(d.model_level),
     effort: toStr(d.effort),
     runner: (toStr(d.runner) || 'claude-code') as Role['runner'],
     allowedTools: Array.isArray(d.allowed_tools) ? (d.allowed_tools as unknown[]).map(toStr) : [],
