@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { createControlPlaneDataAccess } from '../src/control-plane/index.js';
 import { loadRole, loadModelProfile } from '../src/control-plane/definitions.js';
-import { startAttempt, type Step } from '../src/control-plane/steps.js';
+import { startAttempt, toStr, type Step } from '../src/control-plane/steps.js';
 
 const require = createRequire(import.meta.url);
 const tsxPackagePath = require.resolve('tsx/package.json');
@@ -50,6 +50,16 @@ async function pollUntilSucceeded(stepId: string, label: string, workerId = 'smo
 }
 await da.assertReady();
 
+async function createSmokeRun(label: string, description: string): Promise<{ runId: string; taskId: string; archStepId: string }> {
+  const result = await runCli(['run', 'create', '--title', `${label} ${Date.now()}`, '--repo', '.', '--description', description]);
+  if (result.status !== 0) throw new Error(`revo run create (${label}) failed:\n${result.stderr}`);
+  return {
+    runId: matchId(result.stdout, /^created run (\S+)$/m, 'run id'),
+    taskId: matchId(result.stdout, /^task (\S+)$/m, 'task id'),
+    archStepId: matchId(result.stdout, /^step (\S+) ready$/m, 'step id'),
+  };
+}
+
 // ─── Smoke 1: verify loadRole/loadModelProfile read from committed head ───────
 
 const architect = await loadRole('architect');
@@ -64,14 +74,7 @@ console.log(`smoke1: loadRole/loadModelProfile OK (architect system prompt lengt
 
 // ─── Smoke 2: architect step → developer step via revo work --once ─────────────
 
-const createResult = await runCli([
-  'run', 'create', '--title', `Worker loop smoke ${Date.now()}`, '--repo', '.', '--description', 'Plan 0007 smoke',
-]);
-if (createResult.status !== 0) throw new Error(`revo run create failed:\n${createResult.stderr}`);
-
-const runId = matchId(createResult.stdout, /^created run (\S+)$/m, 'run id');
-const taskId = matchId(createResult.stdout, /^task (\S+)$/m, 'task id');
-const archStepId = matchId(createResult.stdout, /^step (\S+) ready$/m, 'step id');
+const { runId, taskId, archStepId } = await createSmokeRun('Worker loop smoke', 'Plan 0007 smoke');
 
 console.log(`smoke2a: run=${runId} task=${taskId} archStep=${archStepId}`);
 
@@ -107,13 +110,7 @@ console.log('smoke3: developer step succeeded, no more steps (stub runner return
 
 // ─── Smoke 4: recovery — claim+start without result, then revo work recovers it ──
 
-const createResult2 = await runCli([
-  'run', 'create', '--title', `Worker loop recovery smoke ${Date.now()}`, '--repo', '.', '--description', 'Plan 0007 recovery smoke',
-]);
-if (createResult2.status !== 0) throw new Error(`revo run create (recovery) failed:\n${createResult2.stderr}`);
-
-const runId2 = matchId(createResult2.stdout, /^created run (\S+)$/m, 'run id');
-const archStepId2 = matchId(createResult2.stdout, /^step (\S+) ready$/m, 'step id');
+const { runId: runId2, archStepId: archStepId2 } = await createSmokeRun('Worker loop recovery smoke', 'Plan 0007 recovery smoke');
 
 // Simulate crash: directly claim+start archStepId2 without writing result.
 // Scoped to the specific step created above so recovery is genuinely exercised.
@@ -134,15 +131,15 @@ await da.patchRow('steps', archStepId2, [
 
 const crashStep: Step = {
   id: archStepId2,
-  taskId: String(archRow2.data.task_id ?? ''),
+  taskId: toStr(archRow2.data.task_id),
   runId: runId2,
-  role: String(archRow2.data.role ?? 'architect'),
-  kind: String(archRow2.data.kind ?? 'plan_run'),
+  role: toStr(archRow2.data.role),
+  kind: toStr(archRow2.data.kind),
   status: 'claimed',
   input: archRow2.data.input ?? null,
   output: null,
-  modelProfile: String(archRow2.data.model_profile ?? 'standard'),
-  runAfter: String(archRow2.data.run_after ?? ''),
+  modelProfile: toStr(archRow2.data.model_profile),
+  runAfter: toStr(archRow2.data.run_after),
   attemptCount: Number(archRow2.data.attempt_count ?? 0),
   maxAttempts: Number(archRow2.data.max_attempts ?? 3),
   priority: Number(archRow2.data.priority ?? 0),

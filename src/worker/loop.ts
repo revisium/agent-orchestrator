@@ -47,9 +47,14 @@ async function handleResult(
     await parkForHuman(da, step, attemptId, result);
     return;
   }
-  await writeResult(da, step, attemptId, result.output, result.costs);
   const nextSteps: NewStep[] = result.nextSteps.map((ns) => ({ ...ns, runId: step.runId }));
-  await createSteps(da, nextSteps);
+  // Children are created BEFORE making the parent terminal (writeResult's final patch:steps).
+  // If writeResult then throws, the step stays 'running' → recoverInFlight resets it → safe retry.
+  // Child IDs are tied to this attemptId suffix so a crash-and-retry (new attempt, new suffix)
+  // generates distinct IDs — no createRow collision. Orphaned children from a crashed attempt
+  // remain as stale 'ready' steps; acceptable for MVP single-worker (dedup requires parent_step_id).
+  await createSteps(da, nextSteps, { idSuffix: attemptId.slice(-8) });
+  await writeResult(da, step, attemptId, result.output, result.costs);
 }
 
 export type WorkerDeps = {
@@ -132,6 +137,10 @@ export async function runWorker(deps: WorkerDeps, opts: WorkerOptions): Promise<
   const { da } = deps;
   const { workerId, roles, once, idleSleepMs = 5000, maxCycles, signal } = opts;
 
+  if (!Number.isFinite(idleSleepMs) || idleSleepMs < 0) {
+    throw new Error(`idleSleepMs must be a non-negative finite number, got: ${String(idleSleepMs)}`);
+  }
+
   await recoverInFlight(da, workerId);
 
   let cycles = 0;
@@ -140,7 +149,7 @@ export async function runWorker(deps: WorkerDeps, opts: WorkerOptions): Promise<
     if (signal?.aborted) break;
     if (maxCycles !== undefined && cycles >= maxCycles) break;
     const outcome = await runNextStep(deps, workerId, roles);
-    if (outcome === 'completed') cycles++;
+    if (outcome !== 'idle') cycles++;
     if (once) break;
     if (outcome === 'idle') await sleep(idleSleepMs, signal);
   }

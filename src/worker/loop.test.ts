@@ -120,7 +120,7 @@ const ONCE_OPTS: WorkerOptions = { workerId: 'test-worker', roles: ['architect',
 
 // ─── call order ──────────────────────────────────────────────────────────────
 
-test('loop: call order is recover→claim→loadRole/profile→buildContext→startAttempt→runAgent→writeResult→createSteps', async () => {
+test('loop: call order is recover→claim→loadRole/profile→buildContext→startAttempt→runAgent→createSteps→writeResult', async () => {
   const opLog: string[] = [];
   const { deps, tracked } = makeDeps(opLog, (role) => ({
     output: { done: true },
@@ -162,10 +162,10 @@ test('loop: call order is recover→claim→loadRole/profile→buildContext→st
   const firstPatchAttemptsIdx = opLog.indexOf('patch:attempts');
   assert.ok(firstPatchAttemptsIdx > runAgentIdx, 'writeResult patch:attempts must come after runAgent');
 
-  // 7. createSteps (create:steps) after writeResult's final step patch
-  const lastPatchStepsIdx = opLog.lastIndexOf('patch:steps');
+  // 7. createSteps (create:steps) BEFORE writeResult's final step patch (terminal safety)
   const createNextStepsIdx = opLog.indexOf('create:steps');
-  assert.ok(createNextStepsIdx > lastPatchStepsIdx, 'createSteps must come after writeResult step patch');
+  const lastPatchStepsIdx = opLog.lastIndexOf('patch:steps');
+  assert.ok(createNextStepsIdx < lastPatchStepsIdx, 'createSteps must come before writeResult terminal step patch');
 });
 
 test('loop: does not branch on role name — same code path for architect and developer', async () => {
@@ -250,6 +250,75 @@ test('loop: once returns immediately when no step is claimable', async () => {
   await runWorker(deps, ONCE_OPTS);
 
   assert.ok(!opLog.includes('runAgent'), 'runAgent must not be called when no step is claimable');
+});
+
+// ─── invalid idleSleepMs rejected before loop ────────────────────────────────
+
+test('runWorker: rejects negative idleSleepMs before entering the loop', async () => {
+  const opLog: string[] = [];
+  const { deps } = makeDeps(opLog, () => ({ output: {}, nextSteps: [], costs: [], needsHuman: false }));
+
+  await assert.rejects(
+    () => runWorker(deps, { ...ONCE_OPTS, idleSleepMs: -1 }),
+    /idleSleepMs/,
+    'negative idleSleepMs must be rejected',
+  );
+  await assert.rejects(
+    () => runWorker(deps, { ...ONCE_OPTS, idleSleepMs: NaN }),
+    /idleSleepMs/,
+    'NaN idleSleepMs must be rejected',
+  );
+  assert.ok(!opLog.includes('runAgent'), 'runAgent must not be called when idleSleepMs is invalid');
+});
+
+// ─── maxCycles counts all processed steps (including failed) ─────────────────
+
+test('loop: all-failing runner stops after maxCycles regardless of step success', async () => {
+  const opLog: string[] = [];
+  const { deps, tracked } = makeDeps(opLog, () => { throw new Error('always fails'); });
+
+  // max_attempts: 1 → each failure makes the step dead immediately (no backoff re-queue).
+  // Two dead steps provide exactly 2 'failed' outcomes for maxCycles to count.
+  tracked.seedStep('step-1', { max_attempts: 1 });
+  tracked.seedStep('step-2', { max_attempts: 1 });
+  tracked.seedTask('task-1');
+
+  await runWorker(deps, {
+    workerId: 'test-worker',
+    roles: ['architect', 'developer'],
+    once: false,
+    idleSleepMs: 0,
+    maxCycles: 2,
+  });
+
+  const runAgentCount = opLog.filter((op) => op === 'runAgent').length;
+  assert.equal(runAgentCount, 2, 'all-failing runner with maxCycles=2 must stop after exactly 2 attempts');
+});
+
+// ─── handleResult: createSteps before terminal parent patch ──────────────────
+
+test('loop: handleResult creates next steps before making parent step terminal', async () => {
+  const opLog: string[] = [];
+  const { deps, tracked } = makeDeps(opLog, () => ({
+    output: { done: true },
+    nextSteps: [{ taskId: 'task-1', role: 'developer', kind: 'impl', input: null, modelProfile: 'standard' }],
+    costs: [],
+    needsHuman: false,
+  }));
+
+  tracked.seedStep('step-arch');
+  tracked.seedTask('task-1');
+
+  await runWorker(deps, ONCE_OPTS);
+
+  const createStepsIdx = opLog.indexOf('create:steps');
+  const lastPatchStepsIdx = opLog.lastIndexOf('patch:steps');
+
+  assert.ok(createStepsIdx >= 0, 'create:steps must be called when nextSteps is non-empty');
+  assert.ok(
+    createStepsIdx < lastPatchStepsIdx,
+    `createSteps (${createStepsIdx}) must come before writeResult terminal patch:steps (${lastPatchStepsIdx})`,
+  );
 });
 
 // ─── sleep abort-listener not accumulated ─────────────────────────────────────

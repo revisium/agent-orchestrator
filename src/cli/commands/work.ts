@@ -33,6 +33,11 @@ async function workCommand(options: WorkOptions): Promise<void> {
   const roles = options.roles ? options.roles.split(',').map((r) => r.trim()).filter(Boolean) : ['architect', 'developer'];
   const workerId = resolveWorkerId(options.workerId);
   const idleSleepMs = options.idleSleep === undefined ? 5000 : Number(options.idleSleep);
+  if (!Number.isFinite(idleSleepMs) || idleSleepMs < 0) {
+    console.error(`Error: --idle-sleep must be a non-negative number, got: ${String(options.idleSleep)}`);
+    process.exitCode = 1;
+    return;
+  }
   const once = options.once ?? false;
 
   const abortController = new AbortController();
