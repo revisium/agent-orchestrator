@@ -8,6 +8,8 @@ import {
   createSteps,
   failStep,
   recoverInFlight,
+  toStr,
+  type Step,
   type NewStep,
 } from './steps.js';
 
@@ -132,6 +134,36 @@ function createFakeDA() {
 
 const FIXED_NOW = new Date('2026-06-03T10:00:00.000Z');
 const FIXED_SUFFIX = 'testsfx1';
+
+// Rebuild a Step from its persisted row, mirroring production mapStep. Uses the exported toStr
+// (typeof-guarded) instead of coercing with String + a nullish fallback, so an object-valued field
+// can never stringify to a default object representation (Sonar S6551). Simulates a worker
+// refetching the step from the control plane.
+function stepFromRow(
+  getRow: (table: string, rowId: string) => ControlPlaneRow | undefined,
+  rowId: string,
+): Step {
+  const r = getRow('steps', rowId);
+  if (!r) throw new Error(`row not found: ${rowId}`);
+  return {
+    id: r.rowId,
+    taskId: toStr(r.data.task_id),
+    runId: toStr(r.data.run_id),
+    role: toStr(r.data.role),
+    kind: toStr(r.data.kind),
+    status: toStr(r.data.status),
+    input: r.data.input ?? null,
+    output: r.data.output ?? null,
+    modelProfile: toStr(r.data.model_profile),
+    runAfter: toStr(r.data.run_after),
+    attemptCount: Number(r.data.attempt_count ?? 0),
+    maxAttempts: Number(r.data.max_attempts ?? 3),
+    priority: Number(r.data.priority ?? 0),
+    leaseOwner: toStr(r.data.lease_owner),
+    leaseExpiresAt: toStr(r.data.lease_expires_at),
+    deadReason: toStr(r.data.dead_reason),
+  };
+}
 
 // ─── claimNextStep ───────────────────────────────────────────
 
@@ -462,13 +494,14 @@ test('createSteps: never creates attempt rows', async () => {
 
 test('failStep: under max attempts, step is reset to ready with future run_after', async () => {
   const { da, seedStep, seedAttempt, getRow } = createFakeDA();
-  seedStep('step-1', { status: 'running', attempt_count: 0, max_attempts: 3 });
+  // attempt_count=1: startAttempt already counted the in-flight attempt; failStep gates on it.
+  seedStep('step-1', { status: 'running', attempt_count: 1, max_attempts: 3 });
   seedAttempt('attempt-1', { step_id: 'step-1' });
 
   const step = {
     id: 'step-1', taskId: 'task-1', runId: 'run-1', role: 'developer', kind: 'code',
     status: 'running', input: null, output: null, modelProfile: 'standard', runAfter: '',
-    attemptCount: 0, maxAttempts: 3, priority: 0, leaseOwner: 'worker-1',
+    attemptCount: 1, maxAttempts: 3, priority: 0, leaseOwner: 'worker-1',
     leaseExpiresAt: '', deadReason: '',
   };
 
@@ -484,13 +517,14 @@ test('failStep: under max attempts, step is reset to ready with future run_after
 
 test('failStep: at max attempts, step becomes dead', async () => {
   const { da, seedStep, seedAttempt, getRow } = createFakeDA();
-  seedStep('step-1', { status: 'running', attempt_count: 0, max_attempts: 1 });
+  // attempt_count=1 of max 1: startAttempt counted the only allowed attempt, so this fail is fatal.
+  seedStep('step-1', { status: 'running', attempt_count: 1, max_attempts: 1 });
   seedAttempt('attempt-1', { step_id: 'step-1' });
 
   const step = {
     id: 'step-1', taskId: 'task-1', runId: 'run-1', role: 'developer', kind: 'code',
     status: 'running', input: null, output: null, modelProfile: 'standard', runAfter: '',
-    attemptCount: 0, maxAttempts: 1, priority: 0, leaseOwner: 'worker-1',
+    attemptCount: 1, maxAttempts: 1, priority: 0, leaseOwner: 'worker-1',
     leaseExpiresAt: '', deadReason: '',
   };
 
@@ -529,31 +563,8 @@ test('failStep: attempt_count accounting across start→fail cycles reaches corr
   const { da, seedStep, getRow } = createFakeDA();
   seedStep('step-1', { status: 'ready', attempt_count: 0, max_attempts: 2, lease_owner: 'w1', lease_expires_at: 'x' });
 
-  function stepFromRow(rowId: string) {
-    const r = getRow('steps', rowId);
-    if (!r) throw new Error(`row not found: ${rowId}`);
-    return {
-      id: r.rowId,
-      taskId: String(r.data.task_id ?? ''),
-      runId: String(r.data.run_id ?? ''),
-      role: String(r.data.role ?? ''),
-      kind: String(r.data.kind ?? ''),
-      status: String(r.data.status ?? ''),
-      input: r.data.input ?? null,
-      output: r.data.output ?? null,
-      modelProfile: String(r.data.model_profile ?? ''),
-      runAfter: String(r.data.run_after ?? ''),
-      attemptCount: Number(r.data.attempt_count ?? 0),
-      maxAttempts: Number(r.data.max_attempts ?? 3),
-      priority: Number(r.data.priority ?? 0),
-      leaseOwner: String(r.data.lease_owner ?? ''),
-      leaseExpiresAt: String(r.data.lease_expires_at ?? ''),
-      deadReason: String(r.data.dead_reason ?? ''),
-    };
-  }
-
   // First attempt: startAttempt must write attempt_count immediately
-  const step0 = stepFromRow('step-1');
+  const step0 = stepFromRow(getRow, 'step-1');
   const { attemptId: aid1 } = await startAttempt(da, step0, { workerId: 'w1', now: FIXED_NOW, idSuffix: 'sfx1' });
   assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 1, 'attempt_count=1 after first startAttempt');
 
@@ -562,13 +573,44 @@ test('failStep: attempt_count accounting across start→fail cycles reaches corr
   assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 1);
 
   // Second attempt: re-read step so attemptCount=1
-  const step1 = stepFromRow('step-1');
+  const step1 = stepFromRow(getRow, 'step-1');
   assert.equal(step1.attemptCount, 1, 'step1.attemptCount reflects first attempt');
   const { attemptId: aid2 } = await startAttempt(da, step1, { workerId: 'w1', now: FIXED_NOW, idSuffix: 'sfx3' });
   assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 2, 'attempt_count=2 after second startAttempt');
 
   await failStep(da, step1, aid2, { lesson: 'second fail', now: FIXED_NOW, idSuffix: 'sfx4' });
   assert.equal(getRow('steps', 'step-1')?.data.status, 'dead', 'step is dead after exhausting max_attempts=2');
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 2);
+  assert.equal(getRow('steps', 'step-1')?.data.lease_owner, '', 'lease cleared on dead');
+});
+
+test('failStep: refetch between startAttempt and failStep still dies at exactly max_attempts', async () => {
+  // Regression for the double-count bug: failStep must gate on the PERSISTED attempt_count, not on
+  // the caller's snapshot. A worker that refetched the step AFTER startAttempt holds the already-
+  // incremented value; deriving snapshot+1 from it would kill the step one attempt early.
+  const { da, seedStep, getRow } = createFakeDA();
+  seedStep('step-1', { status: 'ready', attempt_count: 0, max_attempts: 2, lease_owner: 'w1', lease_expires_at: 'x' });
+
+  // Attempt 1: start, then refetch the step (attempt_count is now 1) before failing it.
+  const claimed1 = stepFromRow(getRow, 'step-1');
+  const { attemptId: aid1 } = await startAttempt(da, claimed1, { workerId: 'w1', now: FIXED_NOW, idSuffix: 'sfx1' });
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 1, 'startAttempt owns the increment');
+  const refetched1 = stepFromRow(getRow, 'step-1');
+  assert.equal(refetched1.attemptCount, 1, 'refetched snapshot carries the already-incremented count');
+
+  await failStep(da, refetched1, aid1, { lesson: 'fail 1', now: FIXED_NOW, idSuffix: 'sfx2' });
+  // snapshot+1 would be 2 >= max(2) → dead one attempt early; persisted gate (1 < 2) keeps it retryable.
+  assert.equal(getRow('steps', 'step-1')?.data.status, 'ready', 'still retryable, not dead one attempt early');
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 1, 'failStep does not re-write attempt_count');
+
+  // Attempt 2: start (→2), refetch again, then fail → now exactly at the cap → dead.
+  const claimed2 = stepFromRow(getRow, 'step-1');
+  const { attemptId: aid2 } = await startAttempt(da, claimed2, { workerId: 'w1', now: FIXED_NOW, idSuffix: 'sfx3' });
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 2, 'attempt_count=2 after second startAttempt');
+  const refetched2 = stepFromRow(getRow, 'step-1');
+
+  await failStep(da, refetched2, aid2, { lesson: 'fail 2', now: FIXED_NOW, idSuffix: 'sfx4' });
+  assert.equal(getRow('steps', 'step-1')?.data.status, 'dead', 'dead at exactly max_attempts=2');
   assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 2);
   assert.equal(getRow('steps', 'step-1')?.data.lease_owner, '', 'lease cleared on dead');
 });

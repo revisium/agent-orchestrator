@@ -75,7 +75,7 @@ function clockSuffix(opts?: StepClock): string {
   return opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
 }
 
-function toStr(v: unknown): string {
+export function toStr(v: unknown): string {
   if (typeof v === 'string') return v;
   if (typeof v === 'number') return String(v);
   return '';
@@ -293,6 +293,8 @@ export async function createSteps(
     const ns = steps[i];
     if (!ns) continue;
     const stepId = `step_${st}_${ns.role}_${sfx}_${i}`;
+    // Steps with unresolved dependencies start 'pending'; promoting them to 'ready' once their
+    // depends_on complete is the dependency resolver's job, deferred to a later plan (not Plan 0006).
     const hasDeps = ns.dependsOn !== undefined && ns.dependsOn.length > 0;
     await da.createRow('steps', stepId, {
       id: stepId,
@@ -349,25 +351,28 @@ export async function failStep(
     created_at: nowIso,
   });
 
-  // 3. Increment attempt count and update step status
-  const newAttemptCount = step.attemptCount + 1;
+  // 3. Gate on the PERSISTED attempt_count, never the caller's snapshot. startAttempt owns the
+  //    increment and already wrote it, so re-deriving here (snapshot + 1) would double-count a step
+  //    that the worker refetched between startAttempt and failStep, killing it one attempt early.
+  //    failStep therefore reads the current row and does not write attempt_count itself.
+  const current = await da.getRow('steps', step.id);
+  const attemptCount = Number(current?.data.attempt_count ?? step.attemptCount);
+  const maxAttempts = Number(current?.data.max_attempts ?? step.maxAttempts);
 
-  if (newAttemptCount < step.maxAttempts) {
-    // 4. Attempts remain: backoff to ready, clear lease
+  if (attemptCount < maxAttempts) {
+    // 4. Attempts remain: backoff to ready, clear lease (attempt_count left as startAttempt set it)
     await da.patchRow('steps', step.id, [
       { op: 'replace', path: 'status', value: 'ready' },
-      { op: 'replace', path: 'attempt_count', value: newAttemptCount },
-      { op: 'replace', path: 'run_after', value: backoffRunAfter(t, newAttemptCount) },
+      { op: 'replace', path: 'run_after', value: backoffRunAfter(t, attemptCount) },
       { op: 'replace', path: 'lease_owner', value: '' },
       { op: 'replace', path: 'lease_expires_at', value: '' },
       { op: 'replace', path: 'updated_at', value: nowIso },
     ]);
   } else {
     // 5. Cap reached: dead, clear lease
-    const deadReason = opts.lesson ?? opts.error ?? `exhausted ${step.maxAttempts} attempt(s)`;
+    const deadReason = opts.lesson ?? opts.error ?? `exhausted ${maxAttempts} attempt(s)`;
     await da.patchRow('steps', step.id, [
       { op: 'replace', path: 'status', value: 'dead' },
-      { op: 'replace', path: 'attempt_count', value: newAttemptCount },
       { op: 'replace', path: 'dead_reason', value: deadReason },
       { op: 'replace', path: 'lease_owner', value: '' },
       { op: 'replace', path: 'lease_expires_at', value: '' },
