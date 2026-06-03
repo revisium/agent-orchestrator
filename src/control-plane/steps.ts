@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { JsonFilterDto } from '@revisium/client';
 import type { ControlPlaneDataAccess, ControlPlaneRow } from './data-access.js';
+import { ControlPlaneError } from './errors.js';
 
 // ─── public types ───────────────────────────────────────────
 
@@ -44,7 +45,7 @@ export type CostRecord = {
   currency?: string;
 };
 
-export type StepClock = { now?: Date; idSuffix?: string };
+export type StepClock = { now?: Date; idSuffix?: string; parentStepId?: string };
 
 // ─── internal helpers ────────────────────────────────────────
 
@@ -52,7 +53,7 @@ const CLAIM_CAP = 500;
 // Per-step attempt fetch limit during crash recovery; N+1 at startup is acceptable at this scale.
 const RECOVERY_ATTEMPT_CAP = 100;
 
-function compactStamp(date: Date): string {
+export function compactStamp(date: Date): string {
   const pad = (v: number, l = 2) => String(v).padStart(l, '0');
   return [
     date.getUTCFullYear(),
@@ -74,6 +75,7 @@ function clockNow(opts?: StepClock): Date {
 function clockSuffix(opts?: StepClock): string {
   return opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
 }
+
 
 export function toStr(v: unknown): string {
   if (typeof v === 'string') return v;
@@ -292,31 +294,42 @@ export async function createSteps(
   for (let i = 0; i < steps.length; i++) {
     const ns = steps[i];
     if (!ns) continue;
-    const stepId = `step_${st}_${ns.role}_${sfx}_${i}`;
+    // When parentStepId is supplied, derive a deterministic ID from parent + index so that a
+    // crash-and-retry (new attemptId, same parent) regenerates the exact same child IDs.
+    // Using the full parent ID (collision-free, no hash needed) keeps the scheme deterministic
+    // and idempotent: ROW_CONFLICT from createRow means the child already exists → skip.
+    const stepId = opts?.parentStepId
+      ? `${opts.parentStepId}_ch_${i}`
+      : `step_${st}_${ns.role}_${sfx}_${i}`;
     // Steps with unresolved dependencies start 'pending'; promoting them to 'ready' once their
     // depends_on complete is the dependency resolver's job, deferred to a later plan (not Plan 0006).
     const hasDeps = ns.dependsOn !== undefined && ns.dependsOn.length > 0;
-    await da.createRow('steps', stepId, {
-      id: stepId,
-      task_id: ns.taskId,
-      run_id: ns.runId,
-      role: ns.role,
-      kind: ns.kind,
-      status: hasDeps ? 'pending' : 'ready',
-      input: ns.input,
-      output: null,
-      model_profile: ns.modelProfile,
-      run_after: ns.runAfter ?? '',
-      attempt_count: 0,
-      max_attempts: ns.maxAttempts ?? 3,
-      priority: ns.priority ?? 0,
-      depends_on: ns.dependsOn ?? [],
-      lease_owner: '',
-      lease_expires_at: '',
-      dead_reason: '',
-      created_at: nowIso,
-      updated_at: nowIso,
-    });
+    try {
+      await da.createRow('steps', stepId, {
+        id: stepId,
+        task_id: ns.taskId,
+        run_id: ns.runId,
+        role: ns.role,
+        kind: ns.kind,
+        status: hasDeps ? 'pending' : 'ready',
+        input: ns.input,
+        output: null,
+        model_profile: ns.modelProfile,
+        run_after: ns.runAfter ?? '',
+        attempt_count: 0,
+        max_attempts: ns.maxAttempts ?? 3,
+        priority: ns.priority ?? 0,
+        depends_on: ns.dependsOn ?? [],
+        lease_owner: '',
+        lease_expires_at: '',
+        dead_reason: '',
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+    } catch (e) {
+      if (e instanceof ControlPlaneError && e.code === 'ROW_CONFLICT' && opts?.parentStepId) continue;
+      throw e;
+    }
   }
 }
 

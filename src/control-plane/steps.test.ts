@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ControlPlaneDataAccess, ControlPlaneRow, ListRowsOptions, PatchOperation } from './data-access.js';
+import { ControlPlaneError } from './errors.js';
 import {
   claimNextStep,
   startAttempt,
@@ -48,6 +49,9 @@ function createFakeDA() {
     },
 
     async createRow(tbl, rowId, data) {
+      if (getTable(tbl).has(rowId)) {
+        throw new ControlPlaneError('ROW_CONFLICT', `Row already exists: ${tbl}/${rowId}`);
+      }
       writeCalls.push({ op: 'createRow', table: tbl, rowId });
       const row = fakeRow(rowId, data);
       getTable(tbl).set(rowId, row);
@@ -479,6 +483,35 @@ test('createSteps: depends_on is persisted on the row', async () => {
   assert.equal(withDeps?.data.status, 'pending');
   assert.deepEqual(noDeps?.data.depends_on, []);
   assert.equal(noDeps?.data.status, 'ready');
+});
+
+test('createSteps: with parentStepId, child IDs are deterministic (same parent → same ID on repeated calls)', async () => {
+  const { da, rows } = createFakeDA();
+  const ns: NewStep = {
+    taskId: 'task-1', runId: 'run-1', role: 'developer', kind: 'impl', input: null, modelProfile: 'standard',
+  };
+
+  await createSteps(da, [ns], { parentStepId: 'step-parent-1', now: FIXED_NOW });
+
+  const created = rows('steps');
+  assert.equal(created.length, 1);
+  const childId = created[0]?.rowId ?? '';
+  assert.ok(childId.startsWith('step-parent-1_ch_'), 'child ID starts with parentStepId_ch_');
+  assert.ok(childId.endsWith('_0'), 'first child has _0 index suffix');
+  assert.equal(childId, 'step-parent-1_ch_0', 'child ID is parentStepId_ch_index');
+});
+
+test('createSteps: with parentStepId, repeated calls for the same parent are idempotent (no duplicate children)', async () => {
+  const { da, rows } = createFakeDA();
+  const ns: NewStep = {
+    taskId: 'task-1', runId: 'run-1', role: 'developer', kind: 'impl', input: null, modelProfile: 'standard',
+  };
+
+  await createSteps(da, [ns], { parentStepId: 'step-parent-1', now: FIXED_NOW });
+  await createSteps(da, [ns], { parentStepId: 'step-parent-1', now: FIXED_NOW });
+
+  const created = rows('steps');
+  assert.equal(created.length, 1, 'second createSteps call with same parentStepId must be a no-op');
 });
 
 test('createSteps: never creates attempt rows', async () => {

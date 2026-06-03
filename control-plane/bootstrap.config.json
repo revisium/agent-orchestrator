@@ -181,6 +181,13 @@
             "type": "number",
             "default": 0
           },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "default": ""
+            }
+          },
           "lease_owner": {
             "type": "string",
             "default": ""
@@ -566,6 +573,79 @@
       }
     }
   ],
-  "rows": [],
-  "commitMessage": "Bootstrap control-plane schema (plan 0001)"
+  "rows": [
+    {
+      "tableId": "roles",
+      "rowId": "architect",
+      "data": {
+        "id": "architect",
+        "name": "architect",
+        "system_prompt": "You are the architect agent. Analyse the task, break it into concrete implementation steps, and produce a structured plan.",
+        "model_level": "standard",
+        "effort": "high",
+        "runner": "claude-code",
+        "allowed_tools": [],
+        "scope_rules": "{}",
+        "updated_at": "2026-06-03T00:00:00.000Z"
+      }
+    },
+    {
+      "tableId": "roles",
+      "rowId": "developer",
+      "data": {
+        "id": "developer",
+        "name": "developer",
+        "system_prompt": "You are the developer agent. Implement the plan produced by the architect. Do not change architecture or ADRs without explicit approval.",
+        "model_level": "standard",
+        "effort": "high",
+        "runner": "claude-code",
+        "allowed_tools": [],
+        "scope_rules": "{}",
+        "updated_at": "2026-06-03T00:00:00.000Z"
+      }
+    },
+    {
+      "tableId": "model_profiles",
+      "rowId": "standard",
+      "data": {
+        "id": "standard",
+        "level": "standard",
+        "provider": "anthropic",
+        "model_id": "claude-sonnet-4-6",
+        "params": "{}",
+        "cost_per_input": 3.0,
+        "cost_per_output": 15.0,
+        "updated_at": "2026-06-03T00:00:00.000Z"
+      }
+    },
+    {
+      "tableId": "model_profiles",
+      "rowId": "cheap",
+      "data": {
+        "id": "cheap",
+        "level": "cheap",
+        "provider": "anthropic",
+        "model_id": "claude-haiku-4-5-20251001",
+        "params": "{}",
+        "cost_per_input": 0.8,
+        "cost_per_output": 4.0,
+        "updated_at": "2026-06-03T00:00:00.000Z"
+      }
+    },
+    {
+      "tableId": "model_profiles",
+      "rowId": "deep",
+      "data": {
+        "id": "deep",
+        "level": "deep",
+        "provider": "anthropic",
+        "model_id": "claude-opus-4-8",
+        "params": "{}",
+        "cost_per_input": 15.0,
+        "cost_per_output": 75.0,
+        "updated_at": "2026-06-03T00:00:00.000Z"
+      }
+    }
+  ],
+  "commitMessage": "Bootstrap control-plane schema and seed roles/model-profiles (plan 0001+0007)"
 }
