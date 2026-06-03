@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { RowWhereInputDto } from '@revisium/client';
 import type { ControlPlaneDataAccess, ControlPlaneRow, ListRowsOptions, PatchOperation } from './data-access.js';
 import {
   claimNextStep,
@@ -48,13 +47,13 @@ function createFakeDA() {
 
     async createRow(tbl, rowId, data) {
       writeCalls.push({ op: 'createRow', table: tbl, rowId });
-      const row = fakeRow(rowId, data as Record<string, unknown>);
+      const row = fakeRow(rowId, data);
       getTable(tbl).set(rowId, row);
       return row;
     },
 
     async updateRow(tbl, rowId, data) {
-      const row = fakeRow(rowId, data as Record<string, unknown>);
+      const row = fakeRow(rowId, data);
       getTable(tbl).set(rowId, row);
       return row;
     },
@@ -239,7 +238,7 @@ test('claimNextStep: listRows where includes status=ready and role∈roles serve
   const stepsCall = listCalls.find((c) => c.table === 'steps');
   assert.ok(stepsCall, 'expected a listRows call on steps');
 
-  const where = stepsCall.opts?.where as RowWhereInputDto | undefined;
+  const where = stepsCall.opts?.where;
   assert.ok(Array.isArray(where?.AND), 'where.AND should be an array');
 
   const andClauses = where?.AND ?? [];
@@ -249,9 +248,9 @@ test('claimNextStep: listRows where includes status=ready and role∈roles serve
 
   const roleClause = andClauses.find((c) => Array.isArray(c.OR));
   assert.ok(roleClause, 'AND should include an OR clause for roles');
-  const rolePaths = (roleClause.OR ?? []).map((r) => String(r.data?.equals));
-  assert.ok(rolePaths.includes('developer'));
-  assert.ok(rolePaths.includes('tester'));
+  const rolePaths = new Set((roleClause.OR ?? []).map((r) => String(r.data?.equals)));
+  assert.ok(rolePaths.has('developer'));
+  assert.ok(rolePaths.has('tester'));
 });
 
 // ─── startAttempt ────────────────────────────────────────────
@@ -427,6 +426,29 @@ test('createSteps: inserts pending step when dependsOn is non-empty', async () =
   assert.equal(created[0]?.data.status, 'pending');
 });
 
+test('createSteps: depends_on is persisted on the row', async () => {
+  const { da, rows } = createFakeDA();
+  await createSteps(da, [
+    {
+      taskId: 't', runId: 'r', role: 'reviewer', kind: 'review', input: null,
+      modelProfile: 'standard', dependsOn: ['step-a', 'step-b'],
+    },
+    {
+      taskId: 't', runId: 'r', role: 'developer', kind: 'code', input: null,
+      modelProfile: 'standard',
+    },
+  ], { now: FIXED_NOW, idSuffix: FIXED_SUFFIX });
+
+  const created = rows('steps');
+  const withDeps = created.find((r) => r.data.role === 'reviewer');
+  const noDeps = created.find((r) => r.data.role === 'developer');
+
+  assert.deepEqual(withDeps?.data.depends_on, ['step-a', 'step-b']);
+  assert.equal(withDeps?.data.status, 'pending');
+  assert.deepEqual(noDeps?.data.depends_on, []);
+  assert.equal(noDeps?.data.status, 'ready');
+});
+
 test('createSteps: never creates attempt rows', async () => {
   const { da, rows } = createFakeDA();
   await createSteps(da, [
@@ -501,6 +523,54 @@ test('failStep: attempt is closed as failed', async () => {
   const row = getRow('attempts', 'attempt-1');
   assert.equal(row?.data.status, 'failed');
   assert.equal(row?.data.lesson, 'build error');
+});
+
+test('failStep: attempt_count accounting across start→fail cycles reaches correct gate', async () => {
+  const { da, seedStep, getRow } = createFakeDA();
+  seedStep('step-1', { status: 'ready', attempt_count: 0, max_attempts: 2, lease_owner: 'w1', lease_expires_at: 'x' });
+
+  function stepFromRow(rowId: string) {
+    const r = getRow('steps', rowId);
+    if (!r) throw new Error(`row not found: ${rowId}`);
+    return {
+      id: r.rowId,
+      taskId: String(r.data.task_id ?? ''),
+      runId: String(r.data.run_id ?? ''),
+      role: String(r.data.role ?? ''),
+      kind: String(r.data.kind ?? ''),
+      status: String(r.data.status ?? ''),
+      input: r.data.input ?? null,
+      output: r.data.output ?? null,
+      modelProfile: String(r.data.model_profile ?? ''),
+      runAfter: String(r.data.run_after ?? ''),
+      attemptCount: Number(r.data.attempt_count ?? 0),
+      maxAttempts: Number(r.data.max_attempts ?? 3),
+      priority: Number(r.data.priority ?? 0),
+      leaseOwner: String(r.data.lease_owner ?? ''),
+      leaseExpiresAt: String(r.data.lease_expires_at ?? ''),
+      deadReason: String(r.data.dead_reason ?? ''),
+    };
+  }
+
+  // First attempt: startAttempt must write attempt_count immediately
+  const step0 = stepFromRow('step-1');
+  const { attemptId: aid1 } = await startAttempt(da, step0, { workerId: 'w1', now: FIXED_NOW, idSuffix: 'sfx1' });
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 1, 'attempt_count=1 after first startAttempt');
+
+  await failStep(da, step0, aid1, { lesson: 'first fail', now: FIXED_NOW, idSuffix: 'sfx2' });
+  assert.equal(getRow('steps', 'step-1')?.data.status, 'ready', 'step retries after first fail');
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 1);
+
+  // Second attempt: re-read step so attemptCount=1
+  const step1 = stepFromRow('step-1');
+  assert.equal(step1.attemptCount, 1, 'step1.attemptCount reflects first attempt');
+  const { attemptId: aid2 } = await startAttempt(da, step1, { workerId: 'w1', now: FIXED_NOW, idSuffix: 'sfx3' });
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 2, 'attempt_count=2 after second startAttempt');
+
+  await failStep(da, step1, aid2, { lesson: 'second fail', now: FIXED_NOW, idSuffix: 'sfx4' });
+  assert.equal(getRow('steps', 'step-1')?.data.status, 'dead', 'step is dead after exhausting max_attempts=2');
+  assert.equal(getRow('steps', 'step-1')?.data.attempt_count, 2);
+  assert.equal(getRow('steps', 'step-1')?.data.lease_owner, '', 'lease cleared on dead');
 });
 
 // ─── recoverInFlight ─────────────────────────────────────────

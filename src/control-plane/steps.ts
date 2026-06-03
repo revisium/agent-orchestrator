@@ -72,29 +72,46 @@ function clockNow(opts?: StepClock): Date {
 }
 
 function clockSuffix(opts?: StepClock): string {
-  return opts?.idSuffix ?? randomUUID().replace(/-/g, '').slice(0, 8);
+  return opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
+}
+
+function toStr(v: unknown): string {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  return '';
 }
 
 function mapStep(row: ControlPlaneRow): Step {
   const d = row.data;
   return {
     id: row.rowId,
-    taskId: String(d.task_id ?? ''),
-    runId: String(d.run_id ?? ''),
-    role: String(d.role ?? ''),
-    kind: String(d.kind ?? ''),
-    status: String(d.status ?? ''),
+    taskId: toStr(d.task_id),
+    runId: toStr(d.run_id),
+    role: toStr(d.role),
+    kind: toStr(d.kind),
+    status: toStr(d.status),
     input: d.input ?? null,
     output: d.output ?? null,
-    modelProfile: String(d.model_profile ?? ''),
-    runAfter: String(d.run_after ?? ''),
+    modelProfile: toStr(d.model_profile),
+    runAfter: toStr(d.run_after),
     attemptCount: Number(d.attempt_count ?? 0),
     maxAttempts: Number(d.max_attempts ?? 3),
     priority: Number(d.priority ?? 0),
-    leaseOwner: String(d.lease_owner ?? ''),
-    leaseExpiresAt: String(d.lease_expires_at ?? ''),
-    deadReason: String(d.dead_reason ?? ''),
+    leaseOwner: toStr(d.lease_owner),
+    leaseExpiresAt: toStr(d.lease_expires_at),
+    deadReason: toStr(d.dead_reason),
   };
+}
+
+function compareByPriorityThenAge(a: ControlPlaneRow, b: ControlPlaneRow): number {
+  const pa = Number(a.data.priority ?? 0);
+  const pb = Number(b.data.priority ?? 0);
+  if (pb !== pa) return pb - pa;
+  const ca = toStr(a.data.created_at);
+  const cb = toStr(b.data.created_at);
+  if (ca < cb) return -1;
+  if (ca > cb) return 1;
+  return 0;
 }
 
 function backoffRunAfter(t: Date, attemptCount: number): string {
@@ -119,6 +136,9 @@ export async function claimNextStep(
   // Server-side: filter status=ready AND role∈roles, sort by priority desc then createdAt asc.
   // WORKAROUND: JsonFilterDto.equals is typed as { [key: string]: unknown } but accepts scalar
   // strings at runtime; the @revisium/client JSON-path scalar-equality type gap requires the cast.
+  // run_after <= now CANNOT be pushed server-side: JsonFilterDto.lte is typed as number only and
+  // has no string/date counterpart. The in-process filter below is the authoritative gate, bounded
+  // by CLAIM_CAP so future-scheduled steps cannot exhaust the cap if they accumulate.
   // In-process: re-apply all predicates for correctness against fake/unconstrained transports.
   const rows = await da.listRows('steps', {
     first: CLAIM_CAP,
@@ -138,19 +158,12 @@ export async function claimNextStep(
     .filter((row) => {
       const d = row.data;
       return (
-        String(d.status) === 'ready' &&
-        roles.includes(String(d.role)) &&
-        (String(d.run_after) === '' || String(d.run_after) <= nowIso)
+        toStr(d.status) === 'ready' &&
+        roles.includes(toStr(d.role)) &&
+        (toStr(d.run_after) === '' || toStr(d.run_after) <= nowIso)
       );
     })
-    .sort((a, b) => {
-      const pa = Number(a.data.priority ?? 0);
-      const pb = Number(b.data.priority ?? 0);
-      if (pb !== pa) return pb - pa;
-      const ca = String(a.data.created_at ?? '');
-      const cb = String(b.data.created_at ?? '');
-      return ca < cb ? -1 : ca > cb ? 1 : 0;
-    })
+    .sort(compareByPriorityThenAge)
     .at(0);
 
   if (!candidateRow) return null;
@@ -196,8 +209,11 @@ export async function startAttempt(
     finished_at: '',
   });
 
+  // Increment attempt_count here so crash recovery (recoverInFlight) sees the correct value
+  // even when failStep is never called. failStep reads the same derived value so no double-count.
   await da.patchRow('steps', step.id, [
     { op: 'replace', path: 'status', value: 'running' },
+    { op: 'replace', path: 'attempt_count', value: step.attemptCount + 1 },
     { op: 'replace', path: 'updated_at', value: nowIso },
   ]);
 
@@ -253,10 +269,12 @@ export async function writeResult(
     });
   }
 
-  // 4. Last: flip step status to succeeded
+  // 4. Last: flip step status to succeeded, clear lease so terminal state is not misleading
   await da.patchRow('steps', step.id, [
     { op: 'replace', path: 'status', value: 'succeeded' },
     { op: 'replace', path: 'output', value: output },
+    { op: 'replace', path: 'lease_owner', value: '' },
+    { op: 'replace', path: 'lease_expires_at', value: '' },
     { op: 'replace', path: 'updated_at', value: nowIso },
   ]);
 }
@@ -290,6 +308,7 @@ export async function createSteps(
       attempt_count: 0,
       max_attempts: ns.maxAttempts ?? 3,
       priority: ns.priority ?? 0,
+      depends_on: ns.dependsOn ?? [],
       lease_owner: '',
       lease_expires_at: '',
       dead_reason: '',
@@ -334,20 +353,24 @@ export async function failStep(
   const newAttemptCount = step.attemptCount + 1;
 
   if (newAttemptCount < step.maxAttempts) {
-    // 4. Attempts remain: backoff to ready
+    // 4. Attempts remain: backoff to ready, clear lease
     await da.patchRow('steps', step.id, [
       { op: 'replace', path: 'status', value: 'ready' },
       { op: 'replace', path: 'attempt_count', value: newAttemptCount },
       { op: 'replace', path: 'run_after', value: backoffRunAfter(t, newAttemptCount) },
+      { op: 'replace', path: 'lease_owner', value: '' },
+      { op: 'replace', path: 'lease_expires_at', value: '' },
       { op: 'replace', path: 'updated_at', value: nowIso },
     ]);
   } else {
-    // 5. Cap reached: dead
+    // 5. Cap reached: dead, clear lease
     const deadReason = opts.lesson ?? opts.error ?? `exhausted ${step.maxAttempts} attempt(s)`;
     await da.patchRow('steps', step.id, [
       { op: 'replace', path: 'status', value: 'dead' },
       { op: 'replace', path: 'attempt_count', value: newAttemptCount },
       { op: 'replace', path: 'dead_reason', value: deadReason },
+      { op: 'replace', path: 'lease_owner', value: '' },
+      { op: 'replace', path: 'lease_expires_at', value: '' },
       { op: 'replace', path: 'updated_at', value: nowIso },
     ]);
   }
@@ -363,7 +386,24 @@ export async function recoverInFlight(
   const sfx = clockSuffix(opts);
   const st = compactStamp(t);
 
-  const allSteps = await da.listRows('steps', { first: CLAIM_CAP });
+  // Server-side: filter by lease_owner + status to avoid a full-table scan.
+  // MVP single-worker startup: first-page result (CLAIM_CAP rows) is acceptable; a multi-worker
+  // deployment would need pagination here, but that belongs to a later plan.
+  const allSteps = await da.listRows('steps', {
+    first: CLAIM_CAP,
+    where: {
+      AND: [
+        { data: { path: 'lease_owner', equals: workerId as unknown as JsonFilterDto['equals'] } },
+        {
+          OR: [
+            { data: { path: 'status', equals: 'claimed' as unknown as JsonFilterDto['equals'] } },
+            { data: { path: 'status', equals: 'running' as unknown as JsonFilterDto['equals'] } },
+          ],
+        },
+      ],
+    },
+  });
+  // In-process filter provides correctness against fake/unconstrained transports.
   const orphans = allSteps
     .map(mapStep)
     .filter((s) => s.leaseOwner === workerId && (s.status === 'claimed' || s.status === 'running'));
