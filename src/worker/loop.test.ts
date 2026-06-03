@@ -135,7 +135,7 @@ test('loop: call order is recover→claim→loadRole/profile→buildContext→st
   const opLog: string[] = [];
   const { deps, tracked } = makeDeps(opLog, (role) => ({
     output: { done: true },
-    nextSteps: role.name === 'architect' ? [{ taskId: 'task-1', role: 'developer', kind: 'impl', input: null, modelProfile: 'standard' } as NewStepSpec] : [],
+    nextSteps: role.name === 'architect' ? [{ taskId: 'task-1', role: 'developer', kind: 'impl', input: null, modelProfile: 'standard' }] : [],
     costs: [],
     needsHuman: false,
   }));
@@ -157,25 +157,25 @@ test('loop: call order is recover→claim→loadRole/profile→buildContext→st
   assert.ok(loadProfileIdx > loadRoleIdx, 'loadModelProfile must come after loadRole');
 
   // 3. buildContext reads (get:tasks, list:attempts) after loadModelProfile
-  const getTasksIdx = opLog.findIndex((op) => op === 'get:tasks');
+  const getTasksIdx = opLog.indexOf('get:tasks');
   assert.ok(getTasksIdx > loadProfileIdx, 'buildContext get:tasks must come after loadModelProfile');
 
   // 4. startAttempt (create:attempts) after buildContext
-  const createAttemptsIdx = opLog.findIndex((op) => op === 'create:attempts');
-  const listAttemptsIdx = opLog.findIndex((op) => op === 'list:attempts');
+  const createAttemptsIdx = opLog.indexOf('create:attempts');
+  const listAttemptsIdx = opLog.indexOf('list:attempts');
   assert.ok(createAttemptsIdx > listAttemptsIdx, 'startAttempt must come after buildContext list:attempts');
 
   // 5. runAgent after startAttempt
-  const runAgentIdx = opLog.findIndex((op) => op === 'runAgent');
+  const runAgentIdx = opLog.indexOf('runAgent');
   assert.ok(runAgentIdx > createAttemptsIdx, 'runAgent must come after startAttempt');
 
   // 6. writeResult (patch:attempts then patch:steps) after runAgent
-  const firstPatchAttemptsIdx = opLog.findIndex((op) => op === 'patch:attempts');
+  const firstPatchAttemptsIdx = opLog.indexOf('patch:attempts');
   assert.ok(firstPatchAttemptsIdx > runAgentIdx, 'writeResult patch:attempts must come after runAgent');
 
   // 7. createSteps (create:steps) after writeResult's final step patch
   const lastPatchStepsIdx = opLog.lastIndexOf('patch:steps');
-  const createNextStepsIdx = opLog.findIndex((op) => op === 'create:steps');
+  const createNextStepsIdx = opLog.indexOf('create:steps');
   assert.ok(createNextStepsIdx > lastPatchStepsIdx, 'createSteps must come after writeResult step patch');
 });
 
@@ -215,8 +215,8 @@ test('loop: runner error calls failStep', async () => {
   await runWorker(deps, ONCE_OPTS);
 
   // failStep patches the attempt (failed) and then the step (ready/dead)
-  const patchAttemptsIdx = opLog.findIndex((op) => op === 'patch:attempts');
-  assert.ok(patchAttemptsIdx > opLog.findIndex((op) => op === 'runAgent'), 'patch:attempts after runAgent');
+  const patchAttemptsIdx = opLog.indexOf('patch:attempts');
+  assert.ok(patchAttemptsIdx > opLog.indexOf('runAgent'), 'patch:attempts after runAgent');
 
   // Verify no create:steps was called (no nextSteps on error)
   assert.ok(!opLog.includes('create:steps'), 'create:steps must not be called on runner error');

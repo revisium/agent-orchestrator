@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadRole, loadModelProfile } from './definitions.js';
-import type { ControlPlaneTransport, TransportRow } from './client-transport.js';
+import type { ControlPlaneTransport } from './client-transport.js';
 
 function makeTransport(rows: Record<string, Record<string, unknown>>): ControlPlaneTransport {
   return {
@@ -15,7 +15,7 @@ function makeTransport(rows: Record<string, Record<string, unknown>>): ControlPl
         const err = Object.assign(new Error(`not found: ${key}`), { statusCode: 404 });
         throw err;
       }
-      return { id: rowId, data } as TransportRow;
+      return { id: rowId, data };
     },
     async createRow() { throw new Error('read-only'); },
     async updateRow() { throw new Error('read-only'); },
@@ -89,8 +89,8 @@ test('loadModelProfile: deserializes a model_profiles row', async () => {
       provider: 'anthropic',
       model_id: 'claude-sonnet-4-6',
       params: '{"temperature":0.2}',
-      cost_per_input: 3.0,
-      cost_per_output: 15.0,
+      cost_per_input: 3,
+      cost_per_output: 15,
       updated_at: '2026-06-03T00:00:00.000Z',
     },
   });
@@ -101,8 +101,8 @@ test('loadModelProfile: deserializes a model_profiles row', async () => {
   assert.equal(profile.provider, 'anthropic');
   assert.equal(profile.modelId, 'claude-sonnet-4-6');
   assert.deepEqual(profile.params, { temperature: 0.2 });
-  assert.equal(profile.costPerInput, 3.0);
-  assert.equal(profile.costPerOutput, 15.0);
+  assert.equal(profile.costPerInput, 3);
+  assert.equal(profile.costPerOutput, 15);
 });
 
 test('loadModelProfile: empty params deserializes to {}', async () => {
@@ -114,7 +114,7 @@ test('loadModelProfile: empty params deserializes to {}', async () => {
       model_id: 'claude-haiku-4-5-20251001',
       params: '',
       cost_per_input: 0.8,
-      cost_per_output: 4.0,
+      cost_per_output: 4,
       updated_at: '2026-06-03T00:00:00.000Z',
     },
   });

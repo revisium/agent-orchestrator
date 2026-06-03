@@ -108,7 +108,8 @@ const allStepsAfter = await da.listRows('steps');
 const runStepsAfter = allStepsAfter.filter((s) => String(s.data.run_id) === runId);
 const nonTerminalSteps = runStepsAfter.filter((s) => !['succeeded', 'failed', 'dead'].includes(String(s.data.status)));
 if (nonTerminalSteps.length > 0) {
-  throw new Error(`Unexpected non-terminal steps after developer: ${nonTerminalSteps.map((s) => `${s.rowId}(${String(s.data.status)})`).join(', ')}`);
+  const stepsDesc = nonTerminalSteps.map((s) => `${s.rowId}(${String(s.data.status)})`).join(', ');
+  throw new Error(`Unexpected non-terminal steps after developer: ${stepsDesc}`);
 }
 
 console.log('smoke3: developer step succeeded, no more steps (stub runner returned none)');

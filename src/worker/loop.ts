@@ -15,6 +15,43 @@ import type { Role, ModelProfile } from '../control-plane/definitions.js';
 import type { RunAgent, AttemptResult } from './runner.js';
 import { buildContext } from './build-context.js';
 
+async function processClaimedStep(
+  deps: WorkerDeps,
+  workerId: string,
+  step: Step,
+): Promise<{ attemptId: string; result: AttemptResult } | null> {
+  const { da, loadRole, loadModelProfile, runAgent } = deps;
+  const role = await loadRole(step.role);
+  const profile = await loadModelProfile(role.modelLevel);
+  const context = await buildContext(da, step, role);
+  const { attemptId } = await startAttempt(da, step, { workerId, modelProfile: profile.modelId });
+  try {
+    const result = await runAgent({ role, profile, context, attemptId, step });
+    return { attemptId, result };
+  } catch (err) {
+    await failStep(da, step, attemptId, {
+      lesson: err instanceof Error ? err.message : String(err),
+      error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+    });
+    return null;
+  }
+}
+
+async function handleResult(
+  da: ControlPlaneDataAccess,
+  step: Step,
+  attemptId: string,
+  result: AttemptResult,
+): Promise<void> {
+  if (result.needsHuman) {
+    await parkForHuman(da, step, attemptId, result);
+    return;
+  }
+  await writeResult(da, step, attemptId, result.output, result.costs);
+  const nextSteps: NewStep[] = result.nextSteps.map((ns) => ({ ...ns, runId: step.runId }));
+  await createSteps(da, nextSteps);
+}
+
 export type WorkerDeps = {
   da: ControlPlaneDataAccess;
   loadRole: (name: string) => Promise<Role>;
@@ -71,7 +108,7 @@ async function parkForHuman(
 }
 
 export async function runWorker(deps: WorkerDeps, opts: WorkerOptions): Promise<void> {
-  const { da, loadRole, loadModelProfile, runAgent } = deps;
+  const { da } = deps;
   const { workerId, roles, once, idleSleepMs = 5000, maxCycles, signal } = opts;
 
   // 1. Recovery on startup: reclaim any steps this worker left orphaned.
@@ -92,38 +129,15 @@ export async function runWorker(deps: WorkerDeps, opts: WorkerOptions): Promise<
       continue;
     }
 
-    // 3. Load role and model profile from committed head (versioned data, not loop logic)
-    const role = await loadRole(step.role);
-    const profile = await loadModelProfile(role.modelLevel);
-
-    // 4. Build restart context from state, not history
-    const context = await buildContext(da, step, role);
-
-    // 5. Mint attemptId and mark step running before any external effect
-    const { attemptId } = await startAttempt(da, step, { workerId, modelProfile: profile.modelId });
-
-    // 6. Run injected agent (stub in this slice; real runner in a later plan)
-    let result: AttemptResult;
-    try {
-      result = await runAgent({ role, profile, context, attemptId, step });
-    } catch (err) {
-      await failStep(da, step, attemptId, {
-        lesson: err instanceof Error ? err.message : String(err),
-        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-      });
+    // 3-6. Load role/profile, build context, start attempt, run agent
+    const processed = await processClaimedStep(deps, workerId, step);
+    if (!processed) {
       if (once) break;
       continue;
     }
 
     // 7. Write result or park for human — the loop does NOT branch on role name here
-    if (result.needsHuman) {
-      await parkForHuman(da, step, attemptId, result);
-    } else {
-      await writeResult(da, step, attemptId, result.output, result.costs);
-      // next steps come from the runner's AttemptResult, never from loop logic
-      const nextSteps: NewStep[] = result.nextSteps.map((ns) => ({ ...ns, runId: step.runId }));
-      await createSteps(da, nextSteps);
-    }
+    await handleResult(da, step, processed.attemptId, processed.result);
 
     cycles++;
     if (once) break;

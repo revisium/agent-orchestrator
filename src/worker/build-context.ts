@@ -1,9 +1,10 @@
 import type { JsonFilterDto } from '@revisium/client';
 import type { ControlPlaneDataAccess } from '../control-plane/data-access.js';
 import type { Step } from '../control-plane/steps.js';
+import { toStr } from '../control-plane/steps.js';
 import type { Role } from '../control-plane/definitions.js';
 
-// TODO(adr-digest): load ADR verdict digest here once structure is established.
+// ADR digest not yet included — deferred to a later plan once structure is established.
 
 export async function buildContext(
   da: ControlPlaneDataAccess,
@@ -13,9 +14,9 @@ export async function buildContext(
   const scopeRulesSummary = role.scopeRules ? JSON.stringify(role.scopeRules) : '{}';
 
   const task = await da.getRow('tasks', step.taskId);
-  const taskTitle = task ? String(task.data.title ?? '') : '(unknown task)';
-  const taskScope = task ? String(task.data.scope ?? '') : '';
-  const taskRepo = task ? String(task.data.repo_ref ?? '') : '';
+  const taskTitle = task ? toStr(task.data.title) : '(unknown task)';
+  const taskScope = task ? toStr(task.data.scope) : '';
+  const taskRepo = task ? toStr(task.data.repo_ref) : '';
 
   // WORKAROUND: JsonFilterDto.equals is typed as { [key: string]: unknown } but accepts scalar
   // strings at runtime; mirrors the cast pattern in claimNextStep/recoverInFlight.
@@ -31,7 +32,7 @@ export async function buildContext(
     )
     .map((a) => String(a.data.lesson));
 
-  const inputStr = step.input !== null ? JSON.stringify(step.input) : 'null';
+  const inputStr = step.input === null ? 'null' : JSON.stringify(step.input);
 
   const parts: string[] = [
     `## Role: ${role.name}`,
@@ -50,8 +51,7 @@ export async function buildContext(
     }
   }
 
-  parts.push('## Current step input:');
-  parts.push(inputStr);
+  parts.push('## Current step input:', inputStr);
 
   return parts.join('\n');
 }

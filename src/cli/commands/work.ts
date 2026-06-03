@@ -32,7 +32,7 @@ function printHint(error: ControlPlaneError): void {
 async function workCommand(options: WorkOptions): Promise<void> {
   const roles = options.roles ? options.roles.split(',').map((r) => r.trim()).filter(Boolean) : ['architect', 'developer'];
   const workerId = resolveWorkerId(options.workerId);
-  const idleSleepMs = options.idleSleep !== undefined ? Number(options.idleSleep) : 5000;
+  const idleSleepMs = options.idleSleep === undefined ? 5000 : Number(options.idleSleep);
   const once = options.once ?? false;
 
   const abortController = new AbortController();

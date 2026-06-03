@@ -9,8 +9,8 @@ const PROFILE: ModelProfile = {
   provider: 'anthropic',
   modelId: 'claude-sonnet-4-6',
   params: {},
-  costPerInput: 3.0,
-  costPerOutput: 15.0,
+  costPerInput: 3,
+  costPerOutput: 15,
 };
 
 const STEP: Step = {
