@@ -43,7 +43,7 @@ export const spawnExecutor: ProcessExecutor = (req) =>
   new Promise<ExecResult>((resolve, reject) => {
     const child = spawn(req.command, req.args, {
       cwd: req.cwd,
-      env: req.env ?? process.env,
+      env: req.env ? { ...process.env, ...req.env } : process.env,
       // Own process group → a negative-PID SIGKILL reaps `claude` AND its children on timeout.
       // Do NOT unref(): the parent must stay attached to collect stdout/stderr and observe exit.
       detached: true,

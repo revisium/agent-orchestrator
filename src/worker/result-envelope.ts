@@ -146,7 +146,7 @@ export function normalizeNextSteps(raw: unknown[], step: Step): NewStepSpec[] {
     };
     if (typeof e.priority === 'number') spec.priority = e.priority;
     if (typeof e.maxAttempts === 'number') spec.maxAttempts = e.maxAttempts;
-    if (Array.isArray(e.dependsOn)) spec.dependsOn = e.dependsOn.map((d) => String(d));
+    if (Array.isArray(e.dependsOn)) spec.dependsOn = e.dependsOn.map(String);
     if (typeof e.runAfter === 'string') spec.runAfter = e.runAfter;
     return spec;
   });

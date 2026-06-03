@@ -46,7 +46,7 @@ const ATTEMPT_ID = 'attempt_20260101T000000000Z_abc12345';
 function run(executor: ProcessExecutor, roleOverrides = {}) {
   const runner = createClaudeCodeRunner({
     executor,
-    resolveCwd: async () => '/tmp/resolved-repo',
+    resolveCwd: async () => '/workspace/repo',
     timeoutMs: 5_000,
   });
   return runner({
@@ -80,7 +80,7 @@ test('claude-code runner: builds the documented claude -p invocation', async () 
     ['--output-format', 'json'],
     'args include --output-format json',
   );
-  assert.equal(req?.cwd, '/tmp/resolved-repo', 'cwd comes from resolveCwd');
+  assert.equal(req?.cwd, '/workspace/repo', 'cwd comes from resolveCwd');
   assert.ok(req?.input?.includes(ATTEMPT_ID), 'prompt delivered on stdin includes the attemptId');
 });
 
@@ -249,7 +249,7 @@ test('claude-code runner: threads attemptId into the prompt and calls only the e
     },
     resolveCwd: async () => {
       resolveCwdCalls++;
-      return '/tmp/x';
+      return '/workspace/x';
     },
     timeoutMs: 5_000,
   });

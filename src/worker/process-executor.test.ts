@@ -59,6 +59,30 @@ test('spawnExecutor: kills a process that exceeds timeoutMs', async () => {
   assert.equal(result.code, null);
 });
 
+test('spawnExecutor: merges caller env with process.env (does not replace it)', async () => {
+  const sentinelKey = 'REVO_TEST_SENTINEL_KEY';
+  const sentinelValue = 'sentinel123';
+  const callerEnv = { [sentinelKey]: sentinelValue };
+
+  const result = await spawnExecutor({
+    command: process.execPath,
+    args: [
+      '-e',
+      // Write BOTH the caller-supplied key and a well-known key from process.env (PATH).
+      // If env was replaced instead of merged, PATH would be absent.
+      `process.stdout.write(JSON.stringify({ caller: process.env['${sentinelKey}'], path: typeof process.env['PATH'] }))`,
+    ],
+    cwd: process.cwd(),
+    timeoutMs: 10_000,
+    env: callerEnv,
+  });
+
+  assert.equal(result.code, 0);
+  const out = JSON.parse(result.stdout) as { caller: string; path: string };
+  assert.equal(out.caller, sentinelValue, 'caller-supplied env key must be present');
+  assert.equal(out.path, 'string', 'PATH from process.env must still be present after merge');
+});
+
 test('spawnExecutor: rejects when the binary is missing', async () => {
   await assert.rejects(
     () =>

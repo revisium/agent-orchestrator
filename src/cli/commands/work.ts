@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { Command } from 'commander';
 import { ControlPlaneError, createControlPlaneDataAccess, loadRole, loadModelProfile, type ControlPlaneDataAccess } from '../../control-plane/index.js';
 import { toStr, type Step } from '../../control-plane/steps.js';
@@ -39,8 +39,7 @@ function printHint(error: ControlPlaneError): void {
 
 // Default resolveCwd (wiring only — keeps schema knowledge out of the runner, per invariant 4).
 // Reads the step's task repo_ref via the data-access layer and resolves it against the workspace base.
-function makeResolveCwd(da: ControlPlaneDataAccess): (step: Step) => Promise<string> {
-  const base = process.cwd();
+export function makeResolveCwd(da: ControlPlaneDataAccess, base = process.cwd()): (step: Step) => Promise<string> {
   return async (step) => {
     const task = await da.getRow('tasks', step.taskId);
     if (task === null) {
@@ -50,7 +49,14 @@ function makeResolveCwd(da: ControlPlaneDataAccess): (step: Step) => Promise<str
     }
     const repoRef = toStr(task.data.repo_ref);
     if (repoRef === '' || repoRef === '.') return base;
-    return resolve(base, repoRef);
+    const resolved = resolve(base, repoRef);
+    // Guard against path traversal: an absolute repoRef or a '../..' chain can escape the workspace.
+    if (resolved !== base && !resolved.startsWith(base + sep)) {
+      throw new Error(
+        `resolveCwd: repo_ref ${JSON.stringify(repoRef)} resolves outside the workspace base ${JSON.stringify(base)} — refusing to launch`,
+      );
+    }
+    return resolved;
   };
 }
 

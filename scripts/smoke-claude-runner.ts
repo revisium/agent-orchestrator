@@ -109,7 +109,7 @@ const result = await runner({
 const elapsedMs = Date.now() - startedAt;
 
 if (!Array.isArray(result.nextSteps)) {
-  throw new Error('smoke:claude-runner FAILED — result.nextSteps is not an array');
+  throw new TypeError('smoke:claude-runner FAILED — result.nextSteps is not an array');
 }
 
 console.log('\nsmoke:claude-runner PASSED');
