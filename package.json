@@ -17,13 +17,13 @@
     "smoke:inspect-run": "tsx scripts/smoke-inspect-run.ts",
     "smoke:step-lifecycle": "tsx scripts/smoke-step-lifecycle.ts",
     "test": "tsx --test src/**/*.test.ts",
-    "test:cov": "node --import tsx --test --experimental-test-coverage --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info src/**/*.test.ts",
+    "test:cov": "mkdir -p coverage && node --import tsx --test --experimental-test-coverage --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint:ci": "eslint . --max-warnings 0",
     "sonar:local": "bash scripts/sonar-local.sh",
     "sonar:issues:local": "bash scripts/sonar-issues-local.sh",
     "ci:local:sonar": "bash scripts/ci-local-sonar.sh",
-    "verify": "npm run typecheck && npm run lint:ci && npm test"
+    "verify": "npm run typecheck && npm run lint:ci && npm run test:cov"
   },
   "dependencies": {
     "@revisium/client": "^0.6.0",

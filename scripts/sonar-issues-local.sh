@@ -62,8 +62,9 @@ for (const issue of issues.slice(0, 50)) {
   console.error(`- ${component}${line} ${issue.rule} ${issue.severity}: ${issue.message}`);
 }
 
-if ((payload.total ?? issues.length) > issues.length) {
-  console.error(`Only first ${issues.length} issue(s) were returned; narrow the query or increase pagination.`);
+const displayedCount = Math.min(50, issues.length);
+if ((payload.total ?? issues.length) > displayedCount) {
+  console.error(`Only first ${displayedCount} issue(s) were returned; narrow the query or increase pagination.`);
 }
 
 process.exit(1);
