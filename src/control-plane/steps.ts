@@ -327,7 +327,7 @@ export async function createSteps(
         updated_at: nowIso,
       });
     } catch (e) {
-      if (e instanceof ControlPlaneError && e.code === 'ROW_CONFLICT') continue;
+      if (e instanceof ControlPlaneError && e.code === 'ROW_CONFLICT' && opts?.parentStepId) continue;
       throw e;
     }
   }
