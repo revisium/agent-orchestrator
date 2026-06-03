@@ -50,10 +50,9 @@ async function handleResult(
   const nextSteps: NewStep[] = result.nextSteps.map((ns) => ({ ...ns, runId: step.runId }));
   // Children are created BEFORE making the parent terminal (writeResult's final patch:steps).
   // If writeResult then throws, the step stays 'running' → recoverInFlight resets it → safe retry.
-  // Child IDs are tied to this attemptId suffix so a crash-and-retry (new attempt, new suffix)
-  // generates distinct IDs — no createRow collision. Orphaned children from a crashed attempt
-  // remain as stale 'ready' steps; acceptable for MVP single-worker (dedup requires parent_step_id).
-  await createSteps(da, nextSteps, { idSuffix: attemptId.slice(-8) });
+  // Child IDs are derived from the parent step ID (+ index), not from attemptId, so a retry
+  // regenerates the same IDs and createSteps' idempotency check skips already-existing rows.
+  await createSteps(da, nextSteps, { parentStepId: step.id });
   await writeResult(da, step, attemptId, result.output, result.costs);
 }
 

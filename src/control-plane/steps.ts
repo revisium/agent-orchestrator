@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import type { JsonFilterDto } from '@revisium/client';
 import type { ControlPlaneDataAccess, ControlPlaneRow } from './data-access.js';
 
@@ -44,7 +44,7 @@ export type CostRecord = {
   currency?: string;
 };
 
-export type StepClock = { now?: Date; idSuffix?: string };
+export type StepClock = { now?: Date; idSuffix?: string; parentStepId?: string };
 
 // ─── internal helpers ────────────────────────────────────────
 
@@ -73,6 +73,13 @@ function clockNow(opts?: StepClock): Date {
 
 function clockSuffix(opts?: StepClock): string {
   return opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
+}
+
+// Derive a short deterministic suffix from a parent step ID.
+// SHA-1 first-8-hex gives 32 bits of uniqueness; plenty for per-run child counts.
+// The result is always 8 lowercase hex chars — safe as a row-ID segment.
+function childStepSuffix(parentStepId: string): string {
+  return createHash('sha1').update(parentStepId).digest('hex').slice(0, 8);
 }
 
 export function toStr(v: unknown): string {
@@ -292,7 +299,19 @@ export async function createSteps(
   for (let i = 0; i < steps.length; i++) {
     const ns = steps[i];
     if (!ns) continue;
-    const stepId = `step_${st}_${ns.role}_${sfx}_${i}`;
+    // When parentStepId is supplied, derive a deterministic ID from parent + index so that a
+    // crash-and-retry (new attemptId, same parent) regenerates the exact same child IDs.
+    // childStepSuffix hashes the parent ID to a short fixed-length hex string so child IDs
+    // remain within the 64-char row-ID limit even when parent IDs are themselves long.
+    // A getRow check before createRow makes the fan-out idempotent: if the child already exists
+    // (created by a previous attempt that crashed after createSteps but before writeResult), skip it.
+    const stepId = opts?.parentStepId
+      ? `step_ch_${childStepSuffix(opts.parentStepId)}_${i}`
+      : `step_${st}_${ns.role}_${sfx}_${i}`;
+    if (opts?.parentStepId) {
+      const existing = await da.getRow('steps', stepId);
+      if (existing) continue;
+    }
     // Steps with unresolved dependencies start 'pending'; promoting them to 'ready' once their
     // depends_on complete is the dependency resolver's job, deferred to a later plan (not Plan 0006).
     const hasDeps = ns.dependsOn !== undefined && ns.dependsOn.length > 0;

@@ -321,6 +321,60 @@ test('loop: handleResult creates next steps before making parent step terminal',
   );
 });
 
+// ─── crash-and-retry idempotency ─────────────────────────────────────────────
+
+test('loop: crash-after-createSteps retry creates children exactly once (idempotent fan-out)', async () => {
+  const opLog: string[] = [];
+  let attemptsPatched = 0;
+
+  const { da: baseDa, seedStep, seedTask, rows } = createTrackedDA(opLog);
+
+  // Fail the very first patchRow('attempts') to simulate writeResult crashing after createSteps.
+  const faultyDa: ControlPlaneDataAccess = {
+    assertReady: baseDa.assertReady,
+    listRows: baseDa.listRows,
+    getRow: baseDa.getRow,
+    createRow: baseDa.createRow,
+    updateRow: baseDa.updateRow,
+    patchRow: async (tbl, rowId, patches) => {
+      if (tbl === 'attempts' && attemptsPatched === 0) {
+        attemptsPatched++;
+        throw new Error('simulated writeResult crash');
+      }
+      return baseDa.patchRow(tbl, rowId, patches);
+    },
+  };
+
+  seedStep('step-arch');
+  seedTask('task-1');
+
+  const deps: WorkerDeps = {
+    da: faultyDa,
+    loadRole: async (name) => { opLog.push(`loadRole:${name}`); return makeRole(name); },
+    loadModelProfile: async (level) => { opLog.push(`loadModelProfile:${level}`); return TEST_PROFILE; },
+    runAgent: async () => ({
+      output: { done: true },
+      // Use a role not in ONCE_OPTS.roles so the child is never claimed in the second run.
+      nextSteps: [{ taskId: 'task-1', role: 'reviewer', kind: 'review', input: null, modelProfile: 'standard' }],
+      costs: [],
+      needsHuman: false,
+    }),
+  };
+
+  // First run: createSteps succeeds, writeResult throws → worker crashes.
+  await assert.rejects(
+    () => runWorker(deps, ONCE_OPTS),
+    /simulated writeResult crash/,
+  );
+
+  // Second run: recoverInFlight resets the running step to ready → it is re-processed →
+  // createSteps uses the same deterministic child IDs and skips already-existing rows.
+  await runWorker(deps, ONCE_OPTS);
+
+  const childSteps = rows('steps').filter((r) => r.rowId !== 'step-arch');
+  assert.equal(childSteps.length, 1, 'child step must be created exactly once despite crash-and-retry');
+});
+
 // ─── sleep abort-listener not accumulated ─────────────────────────────────────
 
 test('sleep: abort listeners are cleaned up after normal timer completion', async () => {

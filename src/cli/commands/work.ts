@@ -29,8 +29,13 @@ function printHint(error: ControlPlaneError): void {
   }
 }
 
-async function workCommand(options: WorkOptions): Promise<void> {
+export async function workCommand(options: WorkOptions): Promise<void> {
   const roles = options.roles ? options.roles.split(',').map((r) => r.trim()).filter(Boolean) : ['architect', 'developer'];
+  if (roles.length === 0) {
+    console.error('Error: --roles produced an empty list; provide at least one role name');
+    process.exitCode = 1;
+    return;
+  }
   const workerId = resolveWorkerId(options.workerId);
   const idleSleepMs = options.idleSleep === undefined ? 5000 : Number(options.idleSleep);
   if (!Number.isFinite(idleSleepMs) || idleSleepMs < 0) {
