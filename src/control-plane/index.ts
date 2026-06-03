@@ -23,3 +23,4 @@ export {
   type CostRecord,
   type StepClock,
 } from './steps.js';
+export { loadRole, loadModelProfile, type Role, type ModelProfile } from './definitions.js';

@@ -16,6 +16,7 @@
     "smoke:create-run": "tsx scripts/smoke-create-run.ts",
     "smoke:inspect-run": "tsx scripts/smoke-inspect-run.ts",
     "smoke:step-lifecycle": "tsx scripts/smoke-step-lifecycle.ts",
+    "smoke:worker-loop": "tsx scripts/smoke-worker-loop.ts",
     "test": "tsx --test src/**/*.test.ts",
     "test:cov": "mkdir -p coverage && node --import tsx --test --experimental-test-coverage --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

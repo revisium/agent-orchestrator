@@ -52,7 +52,7 @@ const CLAIM_CAP = 500;
 // Per-step attempt fetch limit during crash recovery; N+1 at startup is acceptable at this scale.
 const RECOVERY_ATTEMPT_CAP = 100;
 
-function compactStamp(date: Date): string {
+export function compactStamp(date: Date): string {
   const pad = (v: number, l = 2) => String(v).padStart(l, '0');
   return [
     date.getUTCFullYear(),
