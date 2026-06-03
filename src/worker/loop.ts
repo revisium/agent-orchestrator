@@ -107,11 +107,22 @@ async function parkForHuman(
   });
 }
 
+type StepOutcome = 'completed' | 'idle' | 'failed';
+
+async function runNextStep(deps: WorkerDeps, workerId: string, roles: string[]): Promise<StepOutcome> {
+  const { da } = deps;
+  const step = await claimNextStep(da, workerId, roles);
+  if (!step) return 'idle';
+  const processed = await processClaimedStep(deps, workerId, step);
+  if (!processed) return 'failed';
+  await handleResult(da, step, processed.attemptId, processed.result);
+  return 'completed';
+}
+
 export async function runWorker(deps: WorkerDeps, opts: WorkerOptions): Promise<void> {
   const { da } = deps;
   const { workerId, roles, once, idleSleepMs = 5000, maxCycles, signal } = opts;
 
-  // 1. Recovery on startup: reclaim any steps this worker left orphaned.
   await recoverInFlight(da, workerId);
 
   let cycles = 0;
@@ -119,27 +130,9 @@ export async function runWorker(deps: WorkerDeps, opts: WorkerOptions): Promise<
   while (true) {
     if (signal?.aborted) break;
     if (maxCycles !== undefined && cycles >= maxCycles) break;
-
-    // 2. Claim next ready step
-    const step = await claimNextStep(da, workerId, roles);
-
-    if (!step) {
-      if (once) break;
-      await sleep(idleSleepMs, signal);
-      continue;
-    }
-
-    // 3-6. Load role/profile, build context, start attempt, run agent
-    const processed = await processClaimedStep(deps, workerId, step);
-    if (!processed) {
-      if (once) break;
-      continue;
-    }
-
-    // 7. Write result or park for human — the loop does NOT branch on role name here
-    await handleResult(da, step, processed.attemptId, processed.result);
-
-    cycles++;
+    const outcome = await runNextStep(deps, workerId, roles);
+    if (outcome === 'completed') cycles++;
     if (once) break;
+    if (outcome === 'idle') await sleep(idleSleepMs, signal);
   }
 }
