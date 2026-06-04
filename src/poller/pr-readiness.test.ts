@@ -443,6 +443,58 @@ test('maxPolls resolved from input field over env var', async () => {
   }
 });
 
+test('malformed MAX_POLLS/POLL_INTERVAL_MS env vars: fall back to defaults, cap still trips', async () => {
+  const pendingView = prViewResponse([checkRun('SonarCloud', 'IN_PROGRESS')]);
+  const execGh = makeFullResponses(pendingView);
+  // poll_count 20 equals DEFAULT_MAX_POLLS; env vars are deliberately malformed
+  const input: PollInput = { ...BASE_INPUT, poll_count: 20 };
+
+  process.env['MAX_POLLS'] = 'abc';
+  process.env['POLL_INTERVAL_MS'] = 'xyz';
+  try {
+    const result = await run(input, STEP, execGh);
+    assert.equal(result.needsHuman, true, 'malformed MAX_POLLS falls back to default (20); cap trips');
+    assert.equal(result.nextSteps.length, 0, 'no re-queue — cap triggered at default');
+  } finally {
+    delete process.env['MAX_POLLS'];
+    delete process.env['POLL_INTERVAL_MS'];
+  }
+});
+
+test('null user (ghost account): no throw; comment classified as non-bot', async () => {
+  const terminalView = prViewResponse([checkRun('Gitar', 'COMPLETED', 'SUCCESS')]);
+  const reviews = [{ user: null, state: 'COMMENTED', body: 'ghost review' }];
+  const comments = [{ user: null, body: 'ghost comment' }];
+  const execGh = makeFullResponses(terminalView, reviews as never, comments as never);
+
+  const result = await run(BASE_INPUT, STEP, execGh);
+
+  const inp = (result.nextSteps[0]?.input ?? {}) as {
+    human_comments: unknown[];
+    bot_comments: unknown[];
+    human_reviews: unknown[];
+  };
+  assert.equal(inp.bot_comments.length, 0, 'null-user comment is not classified as bot');
+  assert.equal(inp.human_comments.length, 1, 'null-user comment classified as non-bot');
+  assert.equal(inp.human_reviews.length, 0, 'null-user review is skipped in dedup loop');
+});
+
+test('non-JSON gh output: throws descriptive error with label', async () => {
+  const execGh: ExecGhFn = (args) => {
+    if (args.join(' ').includes('statusCheckRollup')) return 'Error: authentication required';
+    return '[]';
+  };
+
+  await assert.rejects(
+    () => run(BASE_INPUT, STEP, execGh),
+    (err: Error) => {
+      assert.ok(err.message.includes('non-JSON'), 'error mentions non-JSON');
+      assert.ok(err.message.includes('pr view'), 'error mentions the pr view label');
+      return true;
+    },
+  );
+});
+
 test('poll_count incremented carries forward all other input fields', async () => {
   const pendingView = prViewResponse([checkRun('SonarCloud', 'IN_PROGRESS')]);
   const execGh = makeFullResponses(pendingView);

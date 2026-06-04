@@ -407,7 +407,7 @@
           "name": {
             "type": "string",
             "default": "",
-            "description": "architect|developer|tester|reviewer|integrator|triage"
+            "description": "architect|developer|reviewer|integrator|ci-poller|pr-watcher"
           },
           "system_prompt": {
             "type": "string",

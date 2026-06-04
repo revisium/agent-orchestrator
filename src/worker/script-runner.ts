@@ -12,6 +12,7 @@ export type ScriptRunnerDeps = {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+/** Wraps registered script modules as a RunAgent with a configurable JS-level timeout. */
 export function createScriptRunner(deps: ScriptRunnerDeps): RunAgent {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -35,6 +36,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): RunAgent {
     });
 
     try {
+      // For sync script bodies (execFileSync in defaultExecGh) the OS-level exec timeout is the real guard; this timer covers async bodies.
       return await Promise.race([module.run(parsedInput, step), timeout]);
     } finally {
       // Clear the timer on every exit (success OR failure); an uncleared setTimeout keeps the

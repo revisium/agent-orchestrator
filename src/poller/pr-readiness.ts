@@ -29,13 +29,13 @@ type StatusContextNode = {
 type CheckItem = CheckRunNode | StatusContextNode;
 
 type ReviewEntry = {
-  user: { login: string; type?: string };
+  user: { login: string; type?: string } | null;
   state: string;
   body: string;
 };
 
 type CommentEntry = {
-  user: { login: string; type?: string };
+  user: { login: string; type?: string } | null;
   path?: string;
   line?: number;
   body: string;
@@ -68,11 +68,27 @@ type SonarIssue = {
 
 export type ExecGhFn = (args: string[]) => string;
 
+/** Calls the `gh` CLI with a 60-second OS-level timeout; throws on non-zero exit. */
 export function defaultExecGh(args: string[]): string {
   // OS-level timeout + maxBuffer: execFileSync is synchronous and blocks the event loop,
   // so the ScriptRunner's Promise.race timer can never fire. The OS timeout is the real
   // backstop that kills a hung gh call; maxBuffer guards against a runaway response.
   return execFileSync('gh', args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
+}
+
+/** Coerces `value` to a finite positive number, returning `defaultValue` for NaN, Infinity, or ≤0. */
+function toFinitePositive(value: unknown, defaultValue: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : defaultValue;
+}
+
+/** Parses JSON returned by `gh`; throws a descriptive Error (not a raw SyntaxError) on failure. */
+function parseGhJson<T>(raw: string, label: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(`gh returned non-JSON for ${label}: ${raw.slice(0, 200)}`);
+  }
 }
 
 // ─── defaults ────────────────────────────────────────────────
@@ -97,8 +113,8 @@ function isPassed(item: CheckItem): boolean {
   return item.state === 'SUCCESS';
 }
 
-function isBot(user: { login: string; type?: string }): boolean {
-  return user.type === 'Bot';
+function isBot(user: { login: string; type?: string } | null | undefined): boolean {
+  return user?.type === 'Bot';
 }
 
 function collectCiChecks(
@@ -130,14 +146,20 @@ function fetchSonarIssues(_sonarProject: string): { issues: SonarIssue[]; unavai
 
 // ─── main script entry ───────────────────────────────────────
 
+/** Polls a GitHub PR for CI readiness; re-queues while pending or hands off to the judge when terminal. */
 export async function run(
   input: PollInput,
   step: Step,
   execGh: ExecGhFn = defaultExecGh,
 ): Promise<AttemptResult> {
-  const maxPolls = input.max_polls ?? Number(process.env['MAX_POLLS'] ?? DEFAULT_MAX_POLLS);
-  const pollIntervalMs =
-    input.poll_interval_ms ?? Number(process.env['POLL_INTERVAL_MS'] ?? DEFAULT_POLL_INTERVAL_MS);
+  const maxPolls = toFinitePositive(
+    input.max_polls ?? process.env['MAX_POLLS'],
+    DEFAULT_MAX_POLLS,
+  );
+  const pollIntervalMs = toFinitePositive(
+    input.poll_interval_ms ?? process.env['POLL_INTERVAL_MS'],
+    DEFAULT_POLL_INTERVAL_MS,
+  );
 
   // 1. Fetch unified CI status via statusCheckRollup (mixes CheckRun + StatusContext nodes)
   const prViewRaw = execGh([
@@ -150,14 +172,14 @@ export async function run(
     'state,isDraft,statusCheckRollup,mergeStateStatus,reviewDecision,mergeable',
   ]);
 
-  const prView = JSON.parse(prViewRaw) as {
+  const prView = parseGhJson<{
     state?: string;
     isDraft?: boolean;
     statusCheckRollup: CheckItem[] | null;
     mergeStateStatus?: string;
     reviewDecision?: string;
     mergeable?: string;
-  };
+  }>(prViewRaw, `pr view #${input.pr_number}`);
 
   // Terminal PR-state check FIRST — the PR's own state takes priority over check state, because a
   // merged/closed PR may still carry an empty or stale rollup. Without this the poller would keep
@@ -264,19 +286,19 @@ export async function run(
     'api',
     `repos/${input.repo}/pulls/${input.pr_number}/reviews`,
   ]);
-  const reviews = JSON.parse(reviewsRaw) as ReviewEntry[];
+  const reviews = parseGhJson<ReviewEntry[]>(reviewsRaw, `reviews #${input.pr_number}`);
 
   const reviewCommentsRaw = execGh([
     'api',
     `repos/${input.repo}/pulls/${input.pr_number}/comments`,
   ]);
-  const reviewComments = JSON.parse(reviewCommentsRaw) as CommentEntry[];
+  const reviewComments = parseGhJson<CommentEntry[]>(reviewCommentsRaw, `review-comments #${input.pr_number}`);
 
   const issueCommentsRaw = execGh([
     'api',
     `repos/${input.repo}/issues/${input.pr_number}/comments`,
   ]);
-  const issueComments = JSON.parse(issueCommentsRaw) as CommentEntry[];
+  const issueComments = parseGhJson<CommentEntry[]>(issueCommentsRaw, `issue-comments #${input.pr_number}`);
 
   const allComments = [...reviewComments, ...issueComments];
 
@@ -288,7 +310,7 @@ export async function run(
   // this a superseded CHANGES_REQUESTED would falsely block.
   const latestHumanReviewByAuthor = new Map<string, ReviewEntry>();
   for (const r of reviews) {
-    if (isBot(r.user)) continue;
+    if (!r.user || isBot(r.user)) continue;
     latestHumanReviewByAuthor.set(r.user.login, r);
   }
   const human_reviews = [...latestHumanReviewByAuthor.values()];
