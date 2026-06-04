@@ -48,11 +48,25 @@ async function handleResult(
     return;
   }
   const nextSteps: NewStep[] = result.nextSteps.map((ns) => ({ ...ns, runId: step.runId }));
-  // Children are created BEFORE making the parent terminal (writeResult's final patch:steps).
-  // If writeResult then throws, the step stays 'running' → recoverInFlight resets it → safe retry.
-  // Child IDs are derived from the parent step ID (+ index), not from attemptId, so a retry
-  // regenerates the same IDs and createSteps' idempotency check skips already-existing rows.
-  await createSteps(da, nextSteps, { parentStepId: step.id });
+  // createSteps runs BEFORE writeResult makes the parent terminal. Child IDs are a bounded,
+  // deterministic hash of (parent id + index), so a retry regenerates the same IDs and
+  // createSteps' idempotency check skips existing rows.
+  //
+  // createSteps failures (e.g. Revisium rejecting an invalid next step) are pre-terminal and
+  // SAFE to fail gracefully: nothing has been finalized yet, so failStep lets the step back off
+  // / go dead instead of crashing the worker. writeResult is DIFFERENT — it mutates several rows
+  // (attempt close, event, cost, then the step), so a partial failure must NOT be routed through
+  // failStep (that would mark a half-written step failed). We let writeResult errors propagate:
+  // the step stays 'running' → recoverInFlight resets it on the next start → idempotent retry.
+  try {
+    await createSteps(da, nextSteps, { parentStepId: step.id });
+  } catch (err) {
+    await failStep(da, step, attemptId, {
+      lesson: err instanceof Error ? err.message : String(err),
+      error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+    });
+    return;
+  }
   await writeResult(da, step, attemptId, result.output, result.costs);
 }
 
