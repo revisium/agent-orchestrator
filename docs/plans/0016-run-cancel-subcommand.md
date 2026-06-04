@@ -335,7 +335,7 @@ When delivering as a PR (per the task input's DELIVERY CONTEXT):
 - **gh account:** `revisium-io`. **Base:** `master`. **PR body:** empty. **Never force-push.**
 - **No `Co-Authored-By`** trailer.
 - Files in the diff: `src/run/cancel-run.ts` (new), `src/run/cancel-run.test.ts` (new),
-  `src/cli/commands/run.ts` (edited), `docs/plans/0013-run-cancel-subcommand.md` (this plan).
+  `src/cli/commands/run.ts` (edited), `docs/plans/0016-run-cancel-subcommand.md` (this plan).
 
 ---
 

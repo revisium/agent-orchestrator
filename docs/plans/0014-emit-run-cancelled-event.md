@@ -6,7 +6,7 @@
 >
 > **This slice only:** when `cancelRun` flips `task_runs.status` to `'cancelled'`, also append one
 > audit row to the `events` table with `type: 'run_cancelled'`. This closes the explicit follow-up
-> deferred by Plan 0013 (`0013-run-cancel-subcommand.md`, lines 14–17). The status-flip behavior,
+> deferred by Plan 0016 (`0016-run-cancel-subcommand.md`, lines 14–17). The status-flip behavior,
 > the `CancelRunResult` shape, the CLI subcommand, and the existing tests stay as they are; we only
 > add the event write plus one test asserting it.
 >
@@ -25,7 +25,7 @@
 > - **CLI output / messaging changes.** `runCancel` in `src/cli/commands/run.ts` (lines 183–196) keeps
 >   printing the same "cancelled run … (was …)" / "already cancelled" lines. No new flags.
 > - Numbering: `0012` and `0013` are taken (`0013` twice: `0013-revo-version-flag.md`,
->   `0013-run-cancel-subcommand.md`); `0009`/`0010`/`0011` are reserved by name in `../roadmap.md`.
+>   `0016-run-cancel-subcommand.md`); `0009`/`0010`/`0011` are reserved by name in `../roadmap.md`.
 >   This slice takes the next free number, `0014`.
 
 ---
