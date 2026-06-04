@@ -43,9 +43,14 @@ function makeFullResponses(
   reviews: unknown[] = [],
   comments: unknown[] = [],
   issueComments: unknown[] = [],
+  prList: unknown[] | null = null,
 ) {
   const fn: ExecGhFn = (args) => {
     const key = args.join(' ');
+    if (key.includes('pr list')) {
+      if (prList === null) throw new Error(`Unexpected gh pr list call: ${key}`);
+      return JSON.stringify(prList);
+    }
     if (key.includes('statusCheckRollup')) return JSON.stringify(prView);
     if (key.includes('reviews')) return JSON.stringify(reviews);
     if (key.includes('issues') && key.includes('comments')) return JSON.stringify(issueComments);
@@ -517,4 +522,134 @@ test('poll_count incremented carries forward all other input fields', async () =
   assert.equal(inp.poll_count, 4);
   assert.equal(inp.poll_interval_ms, 5000);
   assert.equal(inp.max_polls, 10);
+});
+
+// ─── PR resolution tests ─────────────────────────────────────
+
+test('resolve from head_branch when pr_number absent: uses resolved number, re-queue carries it', async () => {
+  const pendingView = prViewResponse([checkRun('SonarCloud', 'IN_PROGRESS')]);
+  const execGh = makeFullResponses(pendingView, [], [], [], [
+    { number: 99, baseRefName: 'master', state: 'OPEN' },
+  ]);
+  const input: PollInput = { repo: 'owner/repo', head_branch: 'feat/my-feature', poll_count: 0 };
+
+  const result = await run(input, STEP, execGh);
+
+  assert.equal(result.nextSteps.length, 1);
+  assert.equal(result.nextSteps[0]?.role, 'ci-poller');
+  const inp = result.nextSteps[0]?.input as PollInput;
+  assert.equal(inp.pr_number, 99, 'resolved pr_number threaded into re-queue');
+  assert.deepEqual(result.costs, []);
+});
+
+test('resolve from head_branch: 0 PRs → needsHuman, lesson mentions the branch name', async () => {
+  const execGh = makeFullResponses(prViewResponse([]), [], [], [], []);
+  const input: PollInput = { repo: 'owner/repo', head_branch: 'feat/my-feature', poll_count: 0 };
+
+  const result = await run(input, STEP, execGh);
+
+  assert.equal(result.needsHuman, true);
+  assert.equal(result.nextSteps.length, 0);
+  assert.ok(result.lesson?.includes('feat/my-feature'), 'lesson mentions branch name');
+  assert.deepEqual(result.costs, []);
+});
+
+test('resolve from head_branch: 2 PRs, exactly one on master → picks master PR', async () => {
+  const pendingView = prViewResponse([checkRun('SonarCloud', 'IN_PROGRESS')]);
+  const execGh = makeFullResponses(pendingView, [], [], [], [
+    { number: 10, baseRefName: 'develop', state: 'OPEN' },
+    { number: 20, baseRefName: 'master', state: 'OPEN' },
+  ]);
+  const input: PollInput = { repo: 'owner/repo', head_branch: 'feat/my-feature', poll_count: 0 };
+
+  const result = await run(input, STEP, execGh);
+
+  assert.equal(result.nextSteps[0]?.role, 'ci-poller');
+  assert.equal((result.nextSteps[0]?.input as PollInput).pr_number, 20, 'picks PR whose base is master');
+});
+
+test('resolve from head_branch: 2 PRs both on master → needsHuman, lesson lists both candidates', async () => {
+  const execGh = makeFullResponses(prViewResponse([]), [], [], [], [
+    { number: 10, baseRefName: 'master', state: 'OPEN' },
+    { number: 20, baseRefName: 'master', state: 'OPEN' },
+  ]);
+  const input: PollInput = { repo: 'owner/repo', head_branch: 'feat/my-feature', poll_count: 0 };
+
+  const result = await run(input, STEP, execGh);
+
+  assert.equal(result.needsHuman, true);
+  assert.equal(result.nextSteps.length, 0);
+  assert.ok(result.lesson?.includes('10'), 'lesson lists candidate #10');
+  assert.ok(result.lesson?.includes('20'), 'lesson lists candidate #20');
+  assert.deepEqual(result.costs, []);
+});
+
+test('neither pr_number nor head_branch → needsHuman, lesson mentions both fields', async () => {
+  const execGh: ExecGhFn = () => { throw new Error('should not be called'); };
+  const input: PollInput = { repo: 'owner/repo', poll_count: 0 };
+
+  const result = await run(input, STEP, execGh);
+
+  assert.equal(result.needsHuman, true);
+  assert.equal(result.nextSteps.length, 0);
+  assert.ok(result.lesson?.includes('pr_number') && result.lesson?.includes('head_branch'));
+  assert.deepEqual(result.costs, []);
+});
+
+test('base_branch override: picks PR on specified base, not default master', async () => {
+  const pendingView = prViewResponse([checkRun('SonarCloud', 'IN_PROGRESS')]);
+  const execGh = makeFullResponses(pendingView, [], [], [], [
+    { number: 10, baseRefName: 'master', state: 'OPEN' },
+    { number: 20, baseRefName: 'develop', state: 'OPEN' },
+  ]);
+  const input: PollInput = {
+    repo: 'owner/repo',
+    head_branch: 'feat/my-feature',
+    base_branch: 'develop',
+    poll_count: 0,
+  };
+
+  const result = await run(input, STEP, execGh);
+
+  assert.equal(result.nextSteps[0]?.role, 'ci-poller');
+  assert.equal((result.nextSteps[0]?.input as PollInput).pr_number, 20, 'picks PR on develop (override)');
+});
+
+test('stale pr_number: gh pr view throws, recovers via head_branch, proceeds normally', async () => {
+  const pendingView = prViewResponse([checkRun('SonarCloud', 'IN_PROGRESS')]);
+  const execGh: ExecGhFn = (args) => {
+    const key = args.join(' ');
+    if (key.includes('pr list')) return JSON.stringify([{ number: 77, baseRefName: 'master', state: 'OPEN' }]);
+    if (key.includes('pr view 42')) throw new Error('Could not find pull request for "42"');
+    if (key.includes('statusCheckRollup')) return JSON.stringify(pendingView);
+    if (key.includes('reviews')) return '[]';
+    if (key.includes('issues') && key.includes('comments')) return '[]';
+    if (key.includes('comments')) return '[]';
+    throw new Error(`Unexpected gh call: ${key}`);
+  };
+  const input: PollInput = { pr_number: 42, repo: 'owner/repo', head_branch: 'feat/my-feature', poll_count: 0 };
+
+  const result = await run(input, STEP, execGh);
+
+  assert.equal(result.needsHuman, undefined, 'stale pr_number recovered — no error thrown');
+  assert.equal(result.nextSteps[0]?.role, 'ci-poller');
+  assert.equal((result.nextSteps[0]?.input as PollInput).pr_number, 77, 'recovered pr_number forwarded');
+});
+
+test('regression: pr_number present and valid → no gh pr list call made', async () => {
+  const pendingView = prViewResponse([checkRun('SonarCloud', 'IN_PROGRESS')]);
+  let prListCalled = false;
+  const execGh: ExecGhFn = (args) => {
+    const key = args.join(' ');
+    if (key.includes('pr list')) { prListCalled = true; return '[]'; }
+    if (key.includes('statusCheckRollup')) return JSON.stringify(pendingView);
+    if (key.includes('reviews')) return '[]';
+    if (key.includes('issues') && key.includes('comments')) return '[]';
+    if (key.includes('comments')) return '[]';
+    throw new Error(`Unexpected gh call: ${key}`);
+  };
+
+  await run(BASE_INPUT, STEP, execGh);
+
+  assert.equal(prListCalled, false, 'gh pr list must NOT be called when pr_number is present and valid');
 });

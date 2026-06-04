@@ -5,8 +5,10 @@ import type { Step } from '../control-plane/steps.js';
 // ─── types ───────────────────────────────────────────────────
 
 export type PollInput = {
-  pr_number: number;
-  repo: string;
+  pr_number?: number;        // optional: resolved from head_branch when missing/stale
+  repo: string;              // "owner/repo"
+  head_branch?: string;      // the PR's head branch — the durable identity key for resolution
+  base_branch?: string;      // target base for >1-PR disambiguation (default "master")
   sonar_project?: string;
   poll_count: number;
   poll_interval_ms?: number;
@@ -91,6 +93,42 @@ function parseGhJson<T>(raw: string, label: string): T {
   }
 }
 
+// ─── PR resolution ──────────────────────────────────────────
+
+type PrListEntry = { number: number; baseRefName: string; state: string };
+
+/**
+ * Resolves the open PR number for a head branch via `gh pr list --head`.
+ * Returns { pr_number } on a unique match (or unique after base-branch tie-break);
+ * returns { needsHuman, lesson } when 0 PRs or >1 still ambiguous after filtering.
+ */
+function resolvePrByBranch(
+  repo: string,
+  headBranch: string,
+  baseBranch: string,
+  execGh: ExecGhFn,
+): { pr_number: number } | { needsHuman: true; lesson: string } {
+  const raw = execGh([
+    'pr', 'list', '--repo', repo, '--head', headBranch, '--state', 'open',
+    '--json', 'number,baseRefName,state',
+  ]);
+  const prs = parseGhJson<PrListEntry[]>(raw, `pr list --head ${headBranch}`);
+
+  if (prs.length === 0) {
+    return { needsHuman: true, lesson: `No open PR found for head branch "${headBranch}" in ${repo} — manual review needed` };
+  }
+  if (prs.length === 1) return { pr_number: prs[0].number };
+
+  const onBase = prs.filter((p) => p.baseRefName === baseBranch);
+  if (onBase.length === 1) return { pr_number: onBase[0].number };
+
+  const candidates = (onBase.length > 1 ? onBase : prs).map((p) => p.number).join(', ');
+  return {
+    needsHuman: true,
+    lesson: `Ambiguous: ${prs.length} open PRs for head branch "${headBranch}" (base ${baseBranch}) — candidates #${candidates} — manual review needed`,
+  };
+}
+
 // ─── defaults ────────────────────────────────────────────────
 
 const DEFAULT_MAX_POLLS = 20;
@@ -154,6 +192,7 @@ function buildJudgeResult(
   prView: { mergeStateStatus?: string; reviewDecision?: string; mergeable?: string },
   ci_passed: boolean,
   checkSummary: Array<{ name: string; result: string }>,
+  prNumber: number,
 ): AttemptResult {
   let sonar_issues: SonarIssue[] = [];
   let sonar_unavailable: boolean | undefined;
@@ -164,14 +203,14 @@ function buildJudgeResult(
     if (sonarResult.unavailable) sonar_unavailable = true;
   }
 
-  const reviewsRaw = execGh(['api', `repos/${input.repo}/pulls/${input.pr_number}/reviews`]);
-  const reviews = parseGhJson<ReviewEntry[]>(reviewsRaw, `reviews #${input.pr_number}`);
+  const reviewsRaw = execGh(['api', `repos/${input.repo}/pulls/${prNumber}/reviews`]);
+  const reviews = parseGhJson<ReviewEntry[]>(reviewsRaw, `reviews #${prNumber}`);
 
-  const reviewCommentsRaw = execGh(['api', `repos/${input.repo}/pulls/${input.pr_number}/comments`]);
-  const reviewComments = parseGhJson<CommentEntry[]>(reviewCommentsRaw, `review-comments #${input.pr_number}`);
+  const reviewCommentsRaw = execGh(['api', `repos/${input.repo}/pulls/${prNumber}/comments`]);
+  const reviewComments = parseGhJson<CommentEntry[]>(reviewCommentsRaw, `review-comments #${prNumber}`);
 
-  const issueCommentsRaw = execGh(['api', `repos/${input.repo}/issues/${input.pr_number}/comments`]);
-  const issueComments = parseGhJson<CommentEntry[]>(issueCommentsRaw, `issue-comments #${input.pr_number}`);
+  const issueCommentsRaw = execGh(['api', `repos/${input.repo}/issues/${prNumber}/comments`]);
+  const issueComments = parseGhJson<CommentEntry[]>(issueCommentsRaw, `issue-comments #${prNumber}`);
 
   const allComments = [...reviewComments, ...issueComments];
 
@@ -229,16 +268,61 @@ export async function run(
     DEFAULT_POLL_INTERVAL_MS,
   );
 
+  const baseBranch = input.base_branch ?? 'master';
+  let prNumber = input.pr_number;
+  let resolvedFromBranch = false;
+
+  if (!prNumber) {
+    if (!input.head_branch) {
+      return {
+        output: { verdict: 'unresolved' },
+        nextSteps: [],
+        needsHuman: true,
+        lesson: `ci-poller step has neither pr_number nor head_branch — cannot identify a PR to watch`,
+        costs: [],
+      };
+    }
+    const resolved = resolvePrByBranch(input.repo, input.head_branch, baseBranch, execGh);
+    if ('needsHuman' in resolved) {
+      return { output: { verdict: 'unresolved' }, nextSteps: [], needsHuman: true, lesson: resolved.lesson, costs: [] };
+    }
+    prNumber = resolved.pr_number;
+    resolvedFromBranch = true;
+  }
+
   // 1. Fetch unified CI status via statusCheckRollup (mixes CheckRun + StatusContext nodes)
-  const prViewRaw = execGh([
-    'pr',
-    'view',
-    String(input.pr_number),
-    '--repo',
-    input.repo,
-    '--json',
-    'state,isDraft,statusCheckRollup,mergeStateStatus,reviewDecision,mergeable',
-  ]);
+  // gh pr view exits non-zero on a stale/deleted PR number — recover from head_branch once.
+  let prViewRaw = '';
+  try {
+    prViewRaw = execGh([
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      input.repo,
+      '--json',
+      'state,isDraft,statusCheckRollup,mergeStateStatus,reviewDecision,mergeable',
+    ]);
+  } catch (viewErr) {
+    if (input.head_branch && !resolvedFromBranch) {
+      const recovered = resolvePrByBranch(input.repo, input.head_branch, baseBranch, execGh);
+      if ('needsHuman' in recovered) {
+        return { output: { verdict: 'unresolved' }, nextSteps: [], needsHuman: true, lesson: recovered.lesson, costs: [] };
+      }
+      prNumber = recovered.pr_number;
+      prViewRaw = execGh([
+        'pr',
+        'view',
+        String(prNumber),
+        '--repo',
+        input.repo,
+        '--json',
+        'state,isDraft,statusCheckRollup,mergeStateStatus,reviewDecision,mergeable',
+      ]);
+    } else {
+      throw viewErr;
+    }
+  }
 
   const prView = parseGhJson<{
     state?: string;
@@ -247,22 +331,22 @@ export async function run(
     mergeStateStatus?: string;
     reviewDecision?: string;
     mergeable?: string;
-  }>(prViewRaw, `pr view #${input.pr_number}`);
+  }>(prViewRaw, `pr view #${prNumber}`);
 
   // Terminal PR-state check FIRST — the PR's own state takes priority over check state, because a
   // merged/closed PR may still carry an empty or stale rollup. Without this the poller would keep
   // re-queuing checks on a finished PR until maxPolls.
   if (prView.state === 'MERGED') {
     // Work is done; nothing left to judge → stop cleanly, no human needed.
-    return { output: { verdict: 'merged', pr_number: input.pr_number }, nextSteps: [], costs: [] };
+    return { output: { verdict: 'merged', pr_number: prNumber }, nextSteps: [], costs: [] };
   }
   if (prView.state === 'CLOSED') {
     // Closed-without-merge is an anomaly for an autonomous loop → surface it to a human.
     return {
-      output: { verdict: 'closed', pr_number: input.pr_number },
+      output: { verdict: 'closed', pr_number: prNumber },
       nextSteps: [],
       needsHuman: true,
-      lesson: `PR #${input.pr_number} was closed without merging — manual review needed`,
+      lesson: `PR #${prNumber} was closed without merging — manual review needed`,
       costs: [],
     };
   }
@@ -277,7 +361,7 @@ export async function run(
         output: { verdict: 'draft', poll_count: input.poll_count },
         nextSteps: [],
         needsHuman: true,
-        lesson: `PR #${input.pr_number} is still a draft after ${input.poll_count} polls`,
+        lesson: `PR #${prNumber} is still a draft after ${input.poll_count} polls`,
         costs: [],
       };
     }
@@ -288,7 +372,7 @@ export async function run(
         {
           role: 'ci-poller',
           kind: 'poll',
-          input: { ...input, poll_count: input.poll_count + 1 },
+          input: { ...input, pr_number: prNumber, poll_count: input.poll_count + 1 },
           runAfter,
           taskId: step.taskId,
           modelProfile: step.modelProfile,
@@ -325,7 +409,7 @@ export async function run(
         {
           role: 'ci-poller',
           kind: 'poll',
-          input: { ...input, poll_count: input.poll_count + 1 },
+          input: { ...input, pr_number: prNumber, poll_count: input.poll_count + 1 },
           runAfter,
           taskId: step.taskId,
           modelProfile: step.modelProfile,
@@ -336,5 +420,5 @@ export async function run(
   }
 
   // 2. All checks terminal — delegate to helper (sonar, reviews, comments → judge step)
-  return buildJudgeResult(input, step, execGh, prView, ci_passed, checkSummary);
+  return buildJudgeResult(input, step, execGh, prView, ci_passed, checkSummary, prNumber);
 }
