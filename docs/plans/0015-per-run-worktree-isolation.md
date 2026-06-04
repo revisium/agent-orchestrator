@@ -396,6 +396,18 @@ are untouched, the stub path (no `--worktrees`) is unaffected, all unit and smok
 
 ---
 
+## Known gaps — git-level isolation only (NOT for parallel)
+
+Worktrees provide **git-level isolation** (clean staging area, isolated branch and working tree per step) but no resource isolation. Three specific dangers must be understood before using `--worktrees` for parallel or resource-sensitive workloads:
+
+1. **`npm install` / `npm ci` inside a worktree writes through the `node_modules` symlink into the main workspace's `node_modules`**, corrupting the shared install for every other concurrent or subsequent run. §0 key fact 3 describes the symlink as "safe for a single-worker sequential loop" but does not name this danger explicitly. Do NOT run `npm install` or `npm ci` inside a worktree; install dependencies in the main workspace only, before starting the worker loop.
+
+2. **Parallel test-environment tasks will collide on shared ports.** The Revisium daemon (default port 19222) and Postgres (default port 15440) are process/host-level resources, not isolated per worktree. Two runs that each try to start the daemon will fight over the same port. Worktrees give zero port or process isolation.
+
+3. **The real fix for parallel or resource-isolated runs is container/VM-level isolation**, not worktrees. Worktrees isolate the git working tree only. Container/VM isolation is tracked as a later hardening pass and is already noted under §8 deferred / "Needs human" below.
+
+---
+
 ## 8. Report back / open findings
 
 Report:
