@@ -372,3 +372,32 @@ test('claude-code runner: releases worktree when result parsing throws', async (
   );
   assert.deepEqual(releaseCalls, ['/workspace/repo/.worktrees/parse-error']);
 });
+
+test('claude-code runner: release failure does not mask a successful AttemptResult', async () => {
+  const manager: WorktreeManager = {
+    async create() {
+      return '/workspace/repo/.worktrees/step-release-fail';
+    },
+    async release() {
+      throw new Error('release failed');
+    },
+  };
+  const stdout = transport(agentBlock({ output: 'done', nextSteps: [], needsHuman: false }));
+  const runner = createClaudeCodeRunner({
+    executor: fakeExecutor(ok(stdout), []),
+    resolveCwd: async () => '/workspace/repo',
+    worktreeManager: manager,
+    timeoutMs: 5_000,
+  });
+
+  const result = await runner({
+    role: makeRole('architect'),
+    profile: PROFILE,
+    context: 'ctx',
+    attemptId: ATTEMPT_ID,
+    step: BASE_STEP,
+  });
+
+  assert.equal(result.output, 'done', 'success AttemptResult is returned despite release failure');
+  assert.equal(result.needsHuman, false);
+});

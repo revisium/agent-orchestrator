@@ -135,7 +135,11 @@ export function createClaudeCodeRunner(deps: ClaudeCodeRunnerDeps): RunAgent {
       };
       return success;
     } finally {
-      await manager.release(cwd);
+      try {
+        await manager.release(cwd);
+      } catch (err) {
+        console.warn(`Warning: worktree release failed for ${cwd}: ${String(err)}`);
+      }
     }
   };
 }
