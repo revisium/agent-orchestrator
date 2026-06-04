@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { ControlPlaneError, createControlPlaneDataAccess } from '../../control-plane/index.js';
 import { createRunWorkflow, CreateRunWorkflowError } from '../../run/create-run.js';
 import { listRuns, showRun, listRunEvents, formatRunList, formatRunDetail, formatEventList } from '../../run/inspect-run.js';
+import { cancelRun } from '../../run/cancel-run.js';
 
 type CreateOptions = {
   title: string;
@@ -179,6 +180,33 @@ async function runEvents(runId: string, options: EventsOptions): Promise<void> {
   }
 }
 
+async function runCancel(runId: string): Promise<void> {
+  try {
+    const da = createControlPlaneDataAccess();
+    const result = await cancelRun(da, runId);
+    if (!result) {
+      console.error(`run not found: ${runId}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (result.previousStatus === 'cancelled') {
+      console.log(`run ${result.runId} already cancelled`);
+    } else {
+      console.log(`cancelled run ${result.runId} (was ${result.previousStatus})`);
+    }
+  } catch (error) {
+    if (error instanceof ControlPlaneError) {
+      console.error(`Error: ${formatCause(error)}`);
+      printHint(error, false);
+    } else if (error instanceof Error) {
+      console.error(`Error: ${error.message}`);
+    } else {
+      console.error(`Error: ${String(error)}`);
+    }
+    process.exitCode = 1;
+  }
+}
+
 export function registerRun(program: Command): void {
   const run = program.command('run').description('Manage orchestrator runs');
 
@@ -215,4 +243,10 @@ export function registerRun(program: Command): void {
     .option('--limit <n>', 'Maximum number of results')
     .option('--json', 'Output as JSON', false)
     .action(runEvents);
+
+  run
+    .command('cancel')
+    .description('Cancel a run')
+    .argument('<runId>', 'Run ID')
+    .action(runCancel);
 }
