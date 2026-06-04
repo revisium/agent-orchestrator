@@ -35,6 +35,8 @@ Living page: per-doc draft status, dependencies, and the build-slice roadmap. Up
 | 0009 — inbox + CLI | Not written | pushInbox/resolveInbox + `inbox/show/approve/answer`; resolves `needsHuman` parks |
 | 0010 — multi-repo strategies | Not written | primitives / engine / strategies |
 | 0011 — GitHub integration | Not written | poll PR/CI/comments + comment sorter |
+| [0017 — PR identity / idempotent integrator](./plans/0017-pr-identity-idempotent-integrator.md) | Draft | integrator find-or-create by branch (prompt) + poller resolves PR number from `head_branch` |
+| [0018 — Sonar issue integration](./plans/0018-sonar-issue-integration-poller.md) | Draft | replace poller Sonar stub: real PR-scoped SonarCloud issues + TO_REVIEW hotspots; judge enforces zero-tolerance |
 
 > Slices 0008+ are indicative, derived from brief §13 — order may shift. "Plan TBD" docs describe a slice whose
 > work-order is not written yet: the doc is the design, the plan turns it into step-by-step build instructions.
