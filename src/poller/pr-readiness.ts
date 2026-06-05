@@ -43,6 +43,22 @@ type CommentEntry = {
   body: string;
 };
 
+type SonarIssue = {
+  severity: string;     // BLOCKER | CRITICAL | MAJOR | MINOR | INFO
+  message: string;
+  component: string;
+  rule?: string;        // e.g. typescript:S1234
+  line?: number;
+};
+
+type SonarHotspot = {
+  message: string;
+  component: string;
+  line?: number;
+  securityCategory?: string;
+  vulnerabilityProbability?: string;  // HIGH | MEDIUM | LOW
+};
+
 export type CiSummary = {
   ci_passed: boolean;
   checks: Array<{ name: string; result: string }>;
@@ -51,6 +67,7 @@ export type CiSummary = {
   reviewDecision?: string;
   mergeable?: string;
   sonar_issues: SonarIssue[];
+  sonar_hotspots_to_review: SonarHotspot[];
   sonar_unavailable?: boolean;
   // Each entry keeps its .state (APPROVED | COMMENTED | DISMISSED | CHANGES_REQUESTED) so the
   // judge can distinguish an approval from a blocking change-request — the field name no longer
@@ -58,12 +75,6 @@ export type CiSummary = {
   human_reviews: ReviewEntry[];
   human_comments: CommentEntry[];
   bot_comments: CommentEntry[];
-};
-
-type SonarIssue = {
-  severity: string;
-  message: string;
-  component: string;
 };
 
 // Shape returned by `gh pr view --json state,...`
@@ -76,7 +87,7 @@ type PrViewData = {
   mergeable?: string;
 };
 
-// ─── injectable seam ─────────────────────────────────────────
+// ─── injectable seams ────────────────────────────────────────
 
 export type ExecGhFn = (args: string[]) => string;
 
@@ -86,6 +97,76 @@ export function defaultExecGh(args: string[]): string {
   // so the ScriptRunner's Promise.race timer can never fire. The OS timeout is the real
   // backstop that kills a hung gh call; maxBuffer guards against a runaway response.
   return execFileSync('gh', args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
+}
+
+export type SonarResult = {
+  issues: SonarIssue[];
+  hotspots: SonarHotspot[];
+  unavailable: boolean;
+};
+
+// projectKey = the sonar.projectKey (PollInput.sonar_project); prNumber = the PR being judged.
+export type FetchSonarFn = (projectKey: string, prNumber: number) => Promise<SonarResult>;
+
+function pickLine(top: unknown, tRange: Record<string, unknown> | undefined): number | undefined {
+  if (typeof top === 'number') return top;
+  const s = tRange?.['startLine'];
+  return typeof s === 'number' ? s : undefined;
+}
+
+function mapSonarIssue(i: Record<string, unknown>): SonarIssue {
+  const tRange = i['textRange'] as Record<string, unknown> | undefined;
+  return {
+    severity: String(i['severity'] ?? 'UNKNOWN'),
+    message: String(i['message'] ?? ''),
+    component: String(i['component'] ?? ''),
+    rule: i['rule'] ? String(i['rule']) : undefined,
+    line: pickLine(i['line'], tRange),
+  };
+}
+
+function mapSonarHotspot(h: Record<string, unknown>): SonarHotspot {
+  const tRange = h['textRange'] as Record<string, unknown> | undefined;
+  return {
+    message: String(h['message'] ?? ''),
+    component: String(h['component'] ?? ''),
+    line: pickLine(h['line'], tRange),
+    securityCategory: h['securityCategory'] ? String(h['securityCategory']) : undefined,
+    vulnerabilityProbability: h['vulnerabilityProbability'] ? String(h['vulnerabilityProbability']) : undefined,
+  };
+}
+
+export async function defaultFetchSonar(projectKey: string, prNumber: number): Promise<SonarResult> {
+  const token = process.env['SONAR_TOKEN'];
+  if (!token) return { issues: [], hotspots: [], unavailable: true };
+  const host = process.env['SONAR_HOST_URL'] ?? 'https://sonarcloud.io';
+  const auth = 'Basic ' + Buffer.from(`${token}:`).toString('base64');
+
+  try {
+    const issuesUrl =
+      `${host}/api/issues/search?componentKeys=${encodeURIComponent(projectKey)}` +
+      `&pullRequest=${prNumber}&statuses=OPEN,CONFIRMED&ps=500`;
+    const hotspotsUrl =
+      `${host}/api/hotspots/search?projectKey=${encodeURIComponent(projectKey)}` +
+      `&pullRequest=${prNumber}&status=TO_REVIEW&ps=500`;
+
+    const [issuesRes, hotspotsRes] = await Promise.all([
+      fetch(issuesUrl, { headers: { Authorization: auth }, signal: AbortSignal.timeout(30_000) }),
+      fetch(hotspotsUrl, { headers: { Authorization: auth }, signal: AbortSignal.timeout(30_000) }),
+    ]);
+    if (!issuesRes.ok || !hotspotsRes.ok) return { issues: [], hotspots: [], unavailable: true };
+
+    const issuesJson = (await issuesRes.json()) as { issues?: Array<Record<string, unknown>> };
+    const hotspotsJson = (await hotspotsRes.json()) as { hotspots?: Array<Record<string, unknown>> };
+
+    return {
+      issues: (issuesJson.issues ?? []).map(mapSonarIssue),
+      hotspots: (hotspotsJson.hotspots ?? []).map(mapSonarHotspot),
+      unavailable: false,
+    };
+  } catch {
+    return { issues: [], hotspots: [], unavailable: true };
+  }
 }
 
 /** Coerces `value` to a finite positive number, returning `defaultValue` for NaN, Infinity, or ≤0. */
@@ -266,34 +347,28 @@ function collectCiChecks(
   return { pending, ci_passed, checks };
 }
 
-// Deferred stub — does NOT call gh. `gh api` only talks to api.github.com (it injects
-// GitHub auth on every request), so a direct sonarcloud.io call always fails; a live call
-// here would be misleading. Real Sonar integration needs a dedicated Sonar host + token and
-// is deferred. Nothing functional is lost: the SonarCloud quality-gate verdict is ALREADY
-// captured via the "SonarCloud Code Analysis" entry in statusCheckRollup (→ ci_passed).
-function fetchSonarIssues(_sonarProject: string): { issues: SonarIssue[]; unavailable: boolean } {
-  return { issues: [], unavailable: true };
-}
-
 // ─── helpers (continued) ─────────────────────────────────────
 
 /** Gathers sonar issues, reviews, and comments; returns the pr-watcher judge step result. */
-function buildJudgeResult(
+async function buildJudgeResult(
   input: PollInput,
   step: Step,
   execGh: ExecGhFn,
+  fetchSonar: FetchSonarFn,
   prView: { mergeStateStatus?: string; reviewDecision?: string; mergeable?: string },
   ci_passed: boolean,
   checkSummary: Array<{ name: string; result: string }>,
   prNumber: number,
-): AttemptResult {
+): Promise<AttemptResult> {
   let sonar_issues: SonarIssue[] = [];
+  let sonar_hotspots_to_review: SonarHotspot[] = [];
   let sonar_unavailable: boolean | undefined;
 
   if (input.sonar_project) {
-    const sonarResult = fetchSonarIssues(input.sonar_project);
-    sonar_issues = sonarResult.issues;
-    if (sonarResult.unavailable) sonar_unavailable = true;
+    const sonar = await fetchSonar(input.sonar_project, prNumber);
+    sonar_issues = sonar.issues;
+    sonar_hotspots_to_review = sonar.hotspots;
+    if (sonar.unavailable) sonar_unavailable = true;
   }
 
   const reviewsRaw = execGh(['api', `repos/${input.repo}/pulls/${prNumber}/reviews`]);
@@ -323,6 +398,7 @@ function buildJudgeResult(
     reviewDecision: prView.reviewDecision,
     mergeable: prView.mergeable,
     sonar_issues,
+    sonar_hotspots_to_review,
     human_reviews,
     human_comments,
     bot_comments,
@@ -351,6 +427,7 @@ export async function run(
   input: PollInput,
   step: Step,
   execGh: ExecGhFn = defaultExecGh,
+  fetchSonar: FetchSonarFn = defaultFetchSonar,
 ): Promise<AttemptResult> {
   const maxPolls = toFinitePositive(
     input.max_polls ?? process.env['MAX_POLLS'],
@@ -437,5 +514,5 @@ export async function run(
   }
 
   // 2. All checks terminal — delegate to helper (sonar, reviews, comments → judge step)
-  return buildJudgeResult(input, step, execGh, prView, ci_passed, checkSummary, prNumber);
+  return buildJudgeResult(input, step, execGh, fetchSonar, prView, ci_passed, checkSummary, prNumber);
 }
