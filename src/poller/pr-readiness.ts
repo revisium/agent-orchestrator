@@ -114,25 +114,32 @@ function pickLine(top: unknown, tRange: Record<string, unknown> | undefined): nu
   return typeof s === 'number' ? s : undefined;
 }
 
+function asStr(v: unknown, fallback = ''): string {
+  return typeof v === 'string' ? v : fallback;
+}
+
 function mapSonarIssue(i: Record<string, unknown>): SonarIssue {
   const tRange = i['textRange'] as Record<string, unknown> | undefined;
+  const rule = asStr(i['rule']);
   return {
-    severity: String(i['severity'] ?? 'UNKNOWN'),
-    message: String(i['message'] ?? ''),
-    component: String(i['component'] ?? ''),
-    rule: i['rule'] ? String(i['rule']) : undefined,
+    severity: asStr(i['severity'], 'UNKNOWN'),
+    message: asStr(i['message']),
+    component: asStr(i['component']),
+    rule: rule || undefined,
     line: pickLine(i['line'], tRange),
   };
 }
 
 function mapSonarHotspot(h: Record<string, unknown>): SonarHotspot {
   const tRange = h['textRange'] as Record<string, unknown> | undefined;
+  const securityCategory = asStr(h['securityCategory']);
+  const vulnerabilityProbability = asStr(h['vulnerabilityProbability']);
   return {
-    message: String(h['message'] ?? ''),
-    component: String(h['component'] ?? ''),
+    message: asStr(h['message']),
+    component: asStr(h['component']),
     line: pickLine(h['line'], tRange),
-    securityCategory: h['securityCategory'] ? String(h['securityCategory']) : undefined,
-    vulnerabilityProbability: h['vulnerabilityProbability'] ? String(h['vulnerabilityProbability']) : undefined,
+    securityCategory: securityCategory || undefined,
+    vulnerabilityProbability: vulnerabilityProbability || undefined,
   };
 }
 
@@ -145,7 +152,7 @@ export async function defaultFetchSonar(projectKey: string, prNumber: number): P
   try {
     const issuesUrl =
       `${host}/api/issues/search?componentKeys=${encodeURIComponent(projectKey)}` +
-      `&pullRequest=${prNumber}&statuses=OPEN,CONFIRMED&ps=500`;
+      `&pullRequest=${prNumber}&statuses=OPEN,CONFIRMED,REOPENED&ps=500`;
     const hotspotsUrl =
       `${host}/api/hotspots/search?projectKey=${encodeURIComponent(projectKey)}` +
       `&pullRequest=${prNumber}&status=TO_REVIEW&ps=500`;
@@ -154,7 +161,11 @@ export async function defaultFetchSonar(projectKey: string, prNumber: number): P
       fetch(issuesUrl, { headers: { Authorization: auth }, signal: AbortSignal.timeout(30_000) }),
       fetch(hotspotsUrl, { headers: { Authorization: auth }, signal: AbortSignal.timeout(30_000) }),
     ]);
-    if (!issuesRes.ok || !hotspotsRes.ok) return { issues: [], hotspots: [], unavailable: true };
+    if (!issuesRes.ok || !hotspotsRes.ok) {
+      const failed = !issuesRes.ok ? `issues ${issuesRes.status}` : `hotspots ${hotspotsRes.status}`;
+      console.warn(`[sonar] fetch degraded: ${failed}`);
+      return { issues: [], hotspots: [], unavailable: true };
+    }
 
     const issuesJson = (await issuesRes.json()) as { issues?: Array<Record<string, unknown>> };
     const hotspotsJson = (await hotspotsRes.json()) as { hotspots?: Array<Record<string, unknown>> };
@@ -164,7 +175,8 @@ export async function defaultFetchSonar(projectKey: string, prNumber: number): P
       hotspots: (hotspotsJson.hotspots ?? []).map(mapSonarHotspot),
       unavailable: false,
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[sonar] fetch degraded: ${String(err)}`);
     return { issues: [], hotspots: [], unavailable: true };
   }
 }
@@ -349,15 +361,19 @@ function collectCiChecks(
 
 // ─── helpers (continued) ─────────────────────────────────────
 
+type CiState = {
+  prView: { mergeStateStatus?: string; reviewDecision?: string; mergeable?: string };
+  ciPassed: boolean;
+  checks: Array<{ name: string; result: string }>;
+};
+
 /** Gathers sonar issues, reviews, and comments; returns the pr-watcher judge step result. */
 async function buildJudgeResult(
   input: PollInput,
   step: Step,
   execGh: ExecGhFn,
   fetchSonar: FetchSonarFn,
-  prView: { mergeStateStatus?: string; reviewDecision?: string; mergeable?: string },
-  ci_passed: boolean,
-  checkSummary: Array<{ name: string; result: string }>,
+  ciState: CiState,
   prNumber: number,
 ): Promise<AttemptResult> {
   let sonar_issues: SonarIssue[] = [];
@@ -391,9 +407,10 @@ async function buildJudgeResult(
   const human_comments = allComments.filter((c) => !isBot(c.user));
   const bot_comments = allComments.filter((c) => isBot(c.user));
 
+  const { prView, ciPassed, checks } = ciState;
   const ci_summary: CiSummary = {
-    ci_passed,
-    checks: checkSummary,
+    ci_passed: ciPassed,
+    checks,
     mergeStateStatus: prView.mergeStateStatus,
     reviewDecision: prView.reviewDecision,
     mergeable: prView.mergeable,
@@ -406,7 +423,7 @@ async function buildJudgeResult(
   };
 
   return {
-    output: { verdict: 'terminal', ci_passed },
+    output: { verdict: 'terminal', ci_passed: ciPassed },
     nextSteps: [
       {
         role: 'pr-watcher',
@@ -514,5 +531,5 @@ export async function run(
   }
 
   // 2. All checks terminal — delegate to helper (sonar, reviews, comments → judge step)
-  return buildJudgeResult(input, step, execGh, fetchSonar, prView, ci_passed, checkSummary, prNumber);
+  return buildJudgeResult(input, step, execGh, fetchSonar, { prView, ciPassed: ci_passed, checks: checkSummary }, prNumber);
 }

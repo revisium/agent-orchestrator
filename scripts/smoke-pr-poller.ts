@@ -70,14 +70,7 @@ const capturingExecGh: prReadiness.ExecGhFn = (ghArgs) => {
 
 if (sonarProject) {
   console.log(`\n=== Sonar direct smoke (project: ${sonarProject}, PR: ${prNumber}) ===`);
-  if (!process.env['SONAR_TOKEN']) {
-    console.log('SONAR_TOKEN not set — testing no-token degradation path:');
-    const noTokenResult = await prReadiness.defaultFetchSonar(sonarProject, prNumber);
-    console.assert(noTokenResult.unavailable === true, 'no-token → unavailable:true');
-    console.assert(noTokenResult.issues.length === 0, 'no-token → issues:[]');
-    console.assert(noTokenResult.hotspots.length === 0, 'no-token → hotspots:[]');
-    console.log('  OK: no-token path returns unavailable:true, no network call attempted.');
-  } else {
+  if (process.env['SONAR_TOKEN']) {
     const sonarResult = await prReadiness.defaultFetchSonar(sonarProject, prNumber);
     console.log(JSON.stringify({ unavailable: sonarResult.unavailable, issues_count: sonarResult.issues.length, hotspots_count: sonarResult.hotspots.length }, null, 2));
     if (sonarResult.issues.length > 0) {
@@ -90,6 +83,13 @@ if (sonarProject) {
     }
     console.assert(sonarResult.unavailable === false, 'valid token + live PR → unavailable must be false');
     console.log('  OK: Sonar live fetch succeeded.');
+  } else {
+    console.log('SONAR_TOKEN not set — testing no-token degradation path:');
+    const noTokenResult = await prReadiness.defaultFetchSonar(sonarProject, prNumber);
+    console.assert(noTokenResult.unavailable === true, 'no-token → unavailable:true');
+    console.assert(noTokenResult.issues.length === 0, 'no-token → issues:[]');
+    console.assert(noTokenResult.hotspots.length === 0, 'no-token → hotspots:[]');
+    console.log('  OK: no-token path returns unavailable:true, no network call attempted.');
   }
   console.log('===========================================\n');
 }
