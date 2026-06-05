@@ -156,8 +156,9 @@ function fetchPrView(prNumber: number, repo: string, execGh: ExecGhFn): PrViewDa
 
 /**
  * Handles a CLOSED pr state. If head_branch is available and we haven't already resolved from it
- * this invocation, attempts to find a replacement open PR. Returns needsHuman on all terminal-closed
- * paths — never throws.
+ * this invocation, attempts to find a replacement open PR. Returns a needsHuman/closed result on
+ * all terminal-closed paths. May propagate a fetchPrView error from the one recovery attempt —
+ * transient errors (timeout, rate-limit) are intentionally not swallowed.
  */
 function handleClosedPr(
   prNumber: number,
@@ -202,9 +203,9 @@ function resolveOpenPr(input: PollInput, baseBranch: string, execGh: ExecGhFn): 
 
   // Fetch the PR view; recover a stale pr_number via head_branch at most once — but ONLY for
   // not-found errors. Transient failures (timeout, rate-limit) must propagate so failStep retries.
-  let prViewResult: PrViewData | undefined;
+  let prView: PrViewData;
   try {
-    prViewResult = fetchPrView(prNumber, input.repo, execGh);
+    prView = fetchPrView(prNumber, input.repo, execGh);
   } catch (err) {
     if (!input.head_branch || resolvedFromBranch || !NOT_FOUND_RE.test(String(err))) {
       throw err;
@@ -213,9 +214,8 @@ function resolveOpenPr(input: PollInput, baseBranch: string, execGh: ExecGhFn): 
     if ('needsHuman' in r) return { kind: 'needsHuman', verdict: 'unresolved', lesson: r.lesson };
     prNumber = r.pr_number;
     resolvedFromBranch = true;
-    prViewResult = fetchPrView(prNumber, input.repo, execGh);
+    prView = fetchPrView(prNumber, input.repo, execGh);
   }
-  const prView = prViewResult!;
 
   if (prView.state === 'MERGED') return { kind: 'merged', prNumber };
   if (prView.state === 'CLOSED') return handleClosedPr(prNumber, resolvedFromBranch, input, baseBranch, execGh);
