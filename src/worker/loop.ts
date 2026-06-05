@@ -110,36 +110,29 @@ async function parkForHuman(
   const st = compactStamp(now);
   const sfx = randomUUID().replaceAll('-', '').slice(0, 8);
 
-  // Close the attempt so it is no longer 'running' while the step waits for a human.
+  // Park-write ordering (split-brain fix). The STEP-flip to `awaiting_approval` is the LAST write, so
+  // a step is parked ONLY AFTER its inbox row exists. Order:
+  //   1. pause the attempt (no longer 'running' while a human is needed);
+  //   2. create the inbox row (the human-visible queue entry);
+  //   3. append the step_needs_human audit event;
+  //   4. flip the step → awaiting_approval + clear lease (THE LAST WRITE).
+  // Why step-flip LAST: if the inbox-create (2) fails with a non-ROW_CONFLICT error, the step is NOT
+  // yet parked — it is still 'running' holding its lease — so recoverInFlight resets it to 'ready' on
+  // the next worker start → a clean retry. Re-parking is idempotent: the inbox id reuses the park's
+  // st/sfx stem (inbox_<stamp>_<sfx>), so the retry recomputes the SAME id and a ROW_CONFLICT is
+  // swallowed as success (exactly one pending row per park). The only residual is a possible DUPLICATE
+  // step_needs_human event if (4) fails after (2)+(3) and is retried — a rare duplicate audit event,
+  // strictly better than an invisible step stuck in awaiting_approval with no inbox row.
+
+  // 1. Close the attempt so it is no longer 'running' while the step waits for a human.
   await da.patchRow('attempts', attemptId, [
     { op: 'replace', path: 'status', value: 'paused' },
     { op: 'replace', path: 'finished_at', value: nowIso },
   ]);
 
-  // Inbox parking: mark step awaiting_approval, clear lease, append event, then write the inbox row
-  // (created below) so a human has a queue and a way to resume the chain.
-  await da.patchRow('steps', step.id, [
-    { op: 'replace', path: 'status', value: 'awaiting_approval' },
-    { op: 'replace', path: 'lease_owner', value: '' },
-    { op: 'replace', path: 'lease_expires_at', value: '' },
-    { op: 'replace', path: 'updated_at', value: nowIso },
-  ]);
-  await da.createRow('events', `event_${st}_step-needs-human_${sfx}`, {
-    id: `event_${st}_step-needs-human_${sfx}`,
-    run_id: step.runId,
-    task_id: step.taskId,
-    step_id: step.id,
-    type: 'step_needs_human',
-    payload: { attempt_id: attemptId, lesson: result.lesson },
-    actor: 'orchestrator',
-    created_at: nowIso,
-  });
-
-  // Inbox row last (the human-visible artifact). Ordering rationale: the step is already
-  // awaiting_approval and the event records the park, so a missing inbox row is recoverable/visible,
-  // whereas a missing step-flip would silently keep the step claimed. The id reuses the park's st/sfx
-  // stem (inbox_<stamp>_<sfx>), so a crash-retry between the step-flip/event-append and this write
-  // recomputes the SAME id — an existing row is SUCCESS, not failure: exactly one pending row per park.
+  // 2. Inbox row FIRST (before the step is parked). Deterministic id (inbox_<stamp>_<sfx>, same stem as
+  // the park event) → a crash-retry recomputes the SAME id, so an existing row for this park is SUCCESS,
+  // not failure: exactly one pending row per park.
   const inbox = buildInboxRow({
     now,
     idSuffix: sfx,
@@ -159,6 +152,27 @@ async function parkForHuman(
     if (!(err instanceof ControlPlaneError && err.code === 'ROW_CONFLICT')) throw err;
     // Row already exists from a prior park attempt — idempotent no-op.
   }
+
+  // 3. Append the step_needs_human audit event.
+  await da.createRow('events', `event_${st}_step-needs-human_${sfx}`, {
+    id: `event_${st}_step-needs-human_${sfx}`,
+    run_id: step.runId,
+    task_id: step.taskId,
+    step_id: step.id,
+    type: 'step_needs_human',
+    payload: { attempt_id: attemptId, lesson: result.lesson },
+    actor: 'orchestrator',
+    created_at: nowIso,
+  });
+
+  // 4. LAST WRITE: flip the step to awaiting_approval and clear its lease. The step becomes parked only
+  // now that its inbox row (2) and audit event (3) exist — no split-brain (parked but invisible).
+  await da.patchRow('steps', step.id, [
+    { op: 'replace', path: 'status', value: 'awaiting_approval' },
+    { op: 'replace', path: 'lease_owner', value: '' },
+    { op: 'replace', path: 'lease_expires_at', value: '' },
+    { op: 'replace', path: 'updated_at', value: nowIso },
+  ]);
 }
 
 type StepOutcome = 'completed' | 'idle' | 'failed';

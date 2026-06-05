@@ -408,11 +408,17 @@ try {
 }
 ```
 
-Ordering: keep attempt-pause → step-flip → event-append → **inbox-create** last. Rationale to encode in
-a comment: the inbox row is the human-visible artifact; if a write fails mid-park the step is already
-`awaiting_approval` and the event records the park, so a missing inbox row is recoverable/visible,
-whereas a missing step-flip would silently keep the step claimed. The deterministic id (not a fresh
-random) is what makes the retry reconcile to the **same** row instead of creating a duplicate.
+Ordering (split-brain fix — supersedes the original "inbox-create last" instruction): the **step-flip
+is the LAST write**. Order is attempt-pause → **inbox-create** → event-append → **step-flip last**. A
+step is parked ONLY AFTER its inbox row exists. Rationale to encode in a comment: if the inbox-create
+fails with a non-`ROW_CONFLICT` error, the step is **not yet** `awaiting_approval` — it is still
+`running` holding its lease — so `recoverInFlight` resets it to `ready` on the next worker start
+(clean retry; re-park is idempotent via the deterministic id + `ROW_CONFLICT` swallow). The only
+residual is a possible **duplicate** `step_needs_human` event if the final step-flip fails after the
+inbox+event writes and is retried — a rare duplicate audit event, strictly better than a step stuck in
+`awaiting_approval` with **no** inbox row (invisible to `inbox list` = split-brain). The deterministic
+id (not a fresh random) is what makes the retry reconcile to the **same** inbox row instead of
+duplicating it.
 
 **Verify:**
 
@@ -699,7 +705,7 @@ export async function resolveInbox(
 > automatically (`answer` ∈ `jsonFields.inbox`). So pass `{ text: … }` as a plain object. The patch
 > arrays are typed as `Array<{ op: 'replace'; path: string; value: unknown }>` to satisfy
 > `PatchOperation[]` (`json-fields.ts:4-8`) without an `as never` cast — confirm it types cleanly.
-
+>
 > **On the atomic transition (#3):** the data-access layer has **no** conditional-patch /
 > compare-and-set primitive (only `getRow`/`patchRow`/`createRow` — `data-access.ts:26-33`).
 > `transitionInboxToResolved` is therefore a re-read-then-patch guard that is correct **under the
@@ -967,6 +973,25 @@ Open findings / deferred:
     there is none today, `data-access.ts:26-33`) still slots in at that one call site **without** touching
     `resolveInbox`; adding it is the follow-up before multiple concurrent resolvers (multi-worker / a web
     UI + CLI racing) are safe.
+- **Park ordering — the STEP-flip is the last write; the inbox row is created BEFORE the step is parked
+  (follow-up fix to the CodeRabbit MAJOR split-brain finding).** `parkForHuman` no longer flips the step
+  to `awaiting_approval` before creating the inbox row. The order is now: (1) pause the attempt; (2)
+  create the inbox row (deterministic `inbox_<stamp>_<sfx>` id; a `ROW_CONFLICT` is swallowed as success
+  — idempotent re-park); (3) append the `step_needs_human` event; (4) **last**, flip the step →
+  `awaiting_approval` + clear lease. Rationale and residual failure mode:
+  - If the **inbox-create (2) fails** with a non-`ROW_CONFLICT` error, the step is **not yet parked** —
+    it is still `running` holding its lease — so `recoverInFlight` resets it to `ready` on the next
+    worker start → a **clean retry with no stuck step**. This is the fix: the old "step-flip FIRST"
+    order left the step `awaiting_approval` with **no** inbox row (invisible to `inbox list`) — a
+    split-brain stuck state.
+  - **Residual:** if the **step-flip (4) fails after** a successful inbox-create + event, a retry
+    re-creates the inbox row (swallowed `ROW_CONFLICT`) and re-emits **one extra `step_needs_human`
+    audit event**. A rare **duplicate audit event is the accepted least-bad failure mode** — strictly
+    better than an invisible stuck step. Verified: `recoverInFlight` (`steps.ts:418-488`) matches steps
+    by `lease_owner == workerId` AND `status ∈ {claimed, running}` and resets them to `ready`; a
+    half-parked step (attempt `paused`, step still `running` with its lease held — `startAttempt` never
+    clears the lease) is recovered cleanly. The `running`-branch attempt-failover inside
+    `recoverInFlight` is a no-op here because the attempt is `paused`, not `running`.
 - **`kind` is always `approval`.** No classifier distinguishes `question`/`alert`; the field is
   explicit so a later sorter (`inbox-and-gates.md:31-42`) can vary it.
 - **Reject sibling cleanup.** `--reject` kills only the parked step (`dead`); sibling steps and the

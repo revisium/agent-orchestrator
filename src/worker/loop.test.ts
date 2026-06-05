@@ -258,6 +258,68 @@ test('loop: needsHuman parks step and creates no next steps', async () => {
   assert.equal(context.lesson, 'needs sign-off');
   assert.deepEqual(context.output, { question: 'approve?' });
   assert.equal(context.step_id, 'step-1');
+
+  // Park write order (split-brain fix): the step-flip is the LAST write. A step is parked ONLY after
+  // its inbox row exists, so the inbox create and the step_needs_human event both precede the final
+  // patch:steps that flips status → awaiting_approval.
+  const createInboxIdx = opLog.indexOf('create:inbox');
+  const createEventsIdx = opLog.indexOf('create:events');
+  const lastPatchStepsIdx = opLog.lastIndexOf('patch:steps');
+  assert.ok(createInboxIdx >= 0, 'inbox row must be created');
+  assert.ok(createInboxIdx < lastPatchStepsIdx, 'inbox create must precede the step awaiting_approval flip');
+  assert.ok(createEventsIdx < lastPatchStepsIdx, 'step_needs_human event must precede the step awaiting_approval flip');
+});
+
+// ─── needsHuman → inbox create failure must NOT leave a parked (split-brain) step ─────────────────
+
+test('loop: a non-conflict inbox createRow failure does not park the step (no split-brain)', async () => {
+  const opLog: string[] = [];
+  const { da: baseDa, seedStep, seedTask, rows, getRowDirect } = createTrackedDA(opLog);
+
+  // Reject the inbox createRow with a NON-ROW_CONFLICT error. The step must NOT be flipped to
+  // awaiting_approval (it stays running with its lease held → recoverInFlight retries it on restart).
+  const faultyDa: ControlPlaneDataAccess = {
+    assertReady: baseDa.assertReady,
+    listRows: baseDa.listRows,
+    getRow: baseDa.getRow,
+    createRow: async (tbl, rowId, data) => {
+      if (tbl === 'inbox') {
+        throw new ControlPlaneError('VALIDATION_FAILURE', `Validation failure: inbox/${rowId}`);
+      }
+      return baseDa.createRow(tbl, rowId, data);
+    },
+    updateRow: baseDa.updateRow,
+    patchRow: baseDa.patchRow,
+  };
+
+  seedStep('step-1');
+  seedTask('task-1');
+
+  const deps: WorkerDeps = {
+    da: faultyDa,
+    loadRole: async (name) => makeRole(name),
+    loadModelProfile: async () => TEST_PROFILE,
+    runAgent: async () => ({
+      output: { question: 'approve?' },
+      nextSteps: [],
+      costs: [],
+      needsHuman: true,
+      lesson: 'needs sign-off',
+    }),
+  };
+
+  // The inbox-create error propagates (parkForHuman does not swallow non-conflict errors; the step is
+  // not yet parked, so recoverInFlight owns the retry — see writeResult's same propagation contract).
+  await assert.rejects(() => runWorker(deps, ONCE_OPTS), /Validation failure: inbox/);
+
+  // Split-brain guard: the step is NOT awaiting_approval, and no inbox row exists for it.
+  const stepRow = getRowDirect('steps', 'step-1');
+  assert.notEqual(stepRow?.data.status, 'awaiting_approval', 'step must not be parked when its inbox row failed to create');
+  assert.equal(rows('inbox').length, 0, 'no inbox row should exist after a non-conflict create failure');
+
+  // The attempt was paused before the inbox write, but the step still holds its lease (running), so
+  // recoverInFlight will reset it on the next worker start.
+  assert.equal(stepRow?.data.lease_owner, 'test-worker', 'step keeps its lease (still running, not parked)');
 });
 
 // ─── once returns on idle ─────────────────────────────────────────────────────
