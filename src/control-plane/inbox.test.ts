@@ -149,6 +149,31 @@ test('buildInboxRow: long lesson is truncated with an ellipsis', () => {
   assert.equal(row.title, 'x'.repeat(119) + '…');
 });
 
+test('buildInboxRow: multi-line lesson is sanitized to a single line (no newlines/control chars)', () => {
+  // Gitar QUALITY fix: embedded newlines/tabs/control chars would break the `revo inbox list` table.
+  const BELL = String.fromCharCode(0x07);
+  const NUL = String.fromCharCode(0x00);
+  const lesson = `line one\nline two\twith tab\r\nand ${BELL}bell ${NUL}nul   trailing   `;
+  const row = buildInboxRow({ now: new Date(), idSuffix: 's', context: { ...CTX, lesson } });
+  assert.equal(row.title, 'line one line two with tab and bell nul trailing');
+  assert.ok(!/[\n\r\t]/.test(row.title), 'no newlines/tabs survive');
+  const hasControlChar = [...row.title].some((ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+  });
+  assert.ok(!hasControlChar, 'no control chars survive');
+});
+
+test('buildInboxRow: whitespace/control runs collapse BEFORE the 120-char truncation', () => {
+  // 130 'x' interleaved with newlines must still truncate to exactly 120 visible chars (no newline
+  // pushing the slice off): sanitize first, then truncate.
+  const lesson = 'x'.repeat(65) + '\n\n\t  ' + 'x'.repeat(65);
+  const row = buildInboxRow({ now: new Date(), idSuffix: 's', context: { ...CTX, lesson } });
+  assert.equal(row.title.length, 120);
+  assert.ok(row.title.endsWith('…'));
+  assert.ok(!/[\n\r\t]/.test(row.title));
+});
+
 // ─── Step 4: listInbox + formatInboxList ─────────────────────────────────────
 
 function seededInbox(): ControlPlaneRow[] {
@@ -350,9 +375,10 @@ test('resolveInbox: already-resolved is a no-op (no step patch, no event, no inb
   assert.equal(creates.length, 0, 'no event');
 });
 
-test('resolveInbox: double-resolve emits no duplicate event (loser is a no-op)', async () => {
+test('resolveInbox: double-resolve emits no duplicate event (top guard short-circuits)', async () => {
   // The fake DA applies patches in place, so after the first resolve the inbox row reads 'resolved'.
-  // A second resolveInbox call therefore short-circuits at the previousStatus guard.
+  // A second resolveInbox call therefore short-circuits at the top already-resolved guard — no step
+  // re-flip, no second event, no second inbox write.
   const { da, patches, creates } = makeFake({ inbox: [inboxRow()], steps: [stepRow('awaiting_approval')] });
   const first = await resolveInbox(da, 'inbox-1', { decision: 'approve', now: NOW, idSuffix: 'first1' });
   const second = await resolveInbox(da, 'inbox-1', { decision: 'approve', now: NOW, idSuffix: 'second1' });
@@ -364,33 +390,38 @@ test('resolveInbox: double-resolve emits no duplicate event (loser is a no-op)',
   assert.equal(patches.filter((p) => p.table === 'steps').length, 1, 'step patched only once');
 });
 
-test('resolveInbox: transition LOSER (status flips between read and re-read) emits nothing', async () => {
-  // Simulate a race: the initial getRow sees 'pending', but the guarded re-read inside
-  // transitionInboxToResolved sees 'resolved' (another resolver won between our two reads).
-  const row = inboxRow();
-  let reads = 0;
-  const da: ControlPlaneDataAccess = {
-    async assertReady() {},
-    async listRows() { return []; },
-    async getRow(table, rowId) {
-      if (table === 'inbox' && rowId === 'inbox-1') {
-        reads += 1;
-        // first read: pending (top of resolveInbox); second read (inside transition helper): resolved
-        return { rowId, data: { ...row.data, status: reads === 1 ? 'pending' : 'resolved' } };
-      }
-      return null;
+test('resolveInbox: step-flip failure leaves inbox PENDING (retryable, no stuck step)', async () => {
+  // ORDERING guard (Gitar EDGE fix): the inbox-`resolved` write is the LAST operation. If the step
+  // patchRow throws, the inbox must NOT have been stamped `resolved` — so the resolve is safely
+  // retryable and the step is never silently stuck in awaiting_approval.
+  const { da, patches, creates } = makeFake(
+    { inbox: [inboxRow()], steps: [stepRow('awaiting_approval')] },
+    {
+      onPatch(table) {
+        if (table === 'steps') throw new Error('step patch boom');
+      },
     },
-    async createRow(_t, rowId, data) { creates.push({ rowId, data }); return { rowId, data }; },
-    async updateRow(_t, rowId, data) { return { rowId, data }; },
-    async patchRow(_t, rowId, _ops) { patched.push(rowId); return { rowId, data: { id: rowId } }; },
-  };
-  const creates: Array<{ rowId: string; data: Record<string, unknown> }> = [];
-  const patched: string[] = [];
-  const result = await resolveInbox(da, 'inbox-1', { decision: 'approve', now: NOW });
-  assert.equal(result?.alreadyResolved, true, 'loser reports alreadyResolved');
-  assert.equal(result?.stepReadied, false);
-  assert.equal(patched.length, 0, 'loser performs no patch');
-  assert.equal(creates.length, 0, 'loser emits no event');
+  );
+  await assert.rejects(
+    () => resolveInbox(da, 'inbox-1', { decision: 'approve', now: NOW }),
+    /step patch boom/,
+    'the step-flip error propagates to the caller',
+  );
+  // The inbox row was NEVER patched to resolved (the inbox write is the trailing op, after the step).
+  assert.ok(!patches.some((p) => p.table === 'inbox'), 'inbox NOT patched when the step flip fails');
+  // And no audit event was emitted (the throw happens before the event create).
+  assert.equal(creates.filter((c) => c.table === 'events').length, 0, 'no event when the step flip fails');
+
+  // A retry now succeeds: the inbox is still pending, the step still awaiting_approval.
+  const { da: da2, patches: patches2, creates: creates2 } = makeFake({
+    inbox: [inboxRow()],
+    steps: [stepRow('awaiting_approval')],
+  });
+  const retry = await resolveInbox(da2, 'inbox-1', { decision: 'approve', now: NOW });
+  assert.equal(retry?.alreadyResolved, false, 'retry is a clean resolve, not a no-op');
+  assert.equal(retry?.stepReadied, true);
+  assert.ok(patches2.some((p) => p.table === 'inbox'), 'retry resolves the inbox');
+  assert.equal(creates2.filter((c) => c.table === 'events').length, 1, 'retry emits exactly one event');
 });
 
 test('resolveInbox: read precedes write', async () => {

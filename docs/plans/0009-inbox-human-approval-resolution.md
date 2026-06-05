@@ -948,13 +948,25 @@ Open findings / deferred:
   the inbox is global (`schema-doc:67`) and there is no per-project routing here. Per-project routing /
   populating `project_id` from the run's repo is deferred (and is also blocked by the "multi-queue /
   per-project routing" out-of-scope note).
-- **Atomic transition is single-worker only; full CAS deferred.** `transitionInboxToResolved` is a
-  re-read-then-patch guard correct **under the single-worker assumption** (the CLI is the only resolver
-  this slice). It is structured so a true conditional / compare-and-set primitive in the data-access
-  layer (e.g. `patchRowIf(table, id, when, patch)` — there is none today, `data-access.ts:26-33`) slots
-  in at that one call site **without** touching `resolveInbox`. Adding that primitive is the follow-up
-  before multiple concurrent resolvers (multi-worker / a web UI + CLI racing) are safe against a
-  duplicate `inbox_resolved` event under a true simultaneous read.
+- **Resolve ordering — step-status is the lock; inbox-`resolved` is the trailing write (follow-up fix
+  to the Gitar EDGE finding).** `resolveInbox` no longer writes the inbox `resolved` first. The order is
+  now: (1) top guard returns on missing / already-`resolved` inbox; (2) flip the step **only if**
+  `step.status === 'awaiting_approval'`; (3) emit the `inbox_resolved` event; (4) **last**, stamp the
+  inbox row `resolved`. The STEP'S status is the idempotency lock — a re-resolve sees the step no longer
+  awaiting and skips the flip. Rationale and residual failure mode:
+  - If the **step-flip (2) fails**, the inbox stays `pending`, so the whole resolve is **safely
+    retryable with no stuck step**. This is the fix: the old "inbox-`resolved` FIRST" order left the
+    step stuck in `awaiting_approval` forever after a step-patch failure (the inbox was already
+    `resolved`, so a re-resolve no-op'd) — the worst failure mode.
+  - **Residual:** if the **inbox-write (4) fails after** a successful flip+event, a retry sees the step
+    is no longer awaiting (no re-flip) and re-emits **one extra `inbox_resolved` audit event**. A rare
+    **duplicate audit event is the accepted least-bad failure mode** — strictly better than a silently
+    stuck step. The **single-worker assumption** (the CLI is the only resolver this slice) still holds
+    and is documented on `writeInboxResolved` (formerly `transitionInboxToResolved`). A true conditional
+    / compare-and-set primitive in the data-access layer (e.g. `patchRowIf(table, id, when, patch)` —
+    there is none today, `data-access.ts:26-33`) still slots in at that one call site **without** touching
+    `resolveInbox`; adding it is the follow-up before multiple concurrent resolvers (multi-worker / a web
+    UI + CLI racing) are safe.
 - **`kind` is always `approval`.** No classifier distinguishes `question`/`alert`; the field is
   explicit so a later sorter (`inbox-and-gates.md:31-42`) can vary it.
 - **Reject sibling cleanup.** `--reject` kills only the parked step (`dead`); sibling steps and the

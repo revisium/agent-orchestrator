@@ -33,10 +33,34 @@ export type InboxRow = {
 
 const TITLE_MAX = 120;
 
+// Collapse every whitespace run (newlines/tabs/spaces) into a single space and strip control chars,
+// matching by code point so the regex carries no literal control characters (keeps `no-control-regex`
+// satisfied without an eslint-disable). Returns a single-line, control-char-free string.
+function sanitizeTitle(lesson: string): string {
+  let out = '';
+  let pendingSpace = false;
+  for (const ch of lesson) {
+    const code = ch.codePointAt(0) ?? 0;
+    const drop = /\s/.test(ch) || code < 0x20 || (code >= 0x7f && code <= 0x9f);
+    if (drop) {
+      pendingSpace = out !== ''; // defer the separator until a kept char actually follows
+      continue;
+    }
+    if (pendingSpace) {
+      out += ' ';
+      pendingSpace = false;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 function deriveTitle(role: string, lesson: string): string {
-  const trimmed = lesson.trim();
-  if (trimmed === '') return `${role || 'step'} needs approval`;
-  return trimmed.length > TITLE_MAX ? `${trimmed.slice(0, TITLE_MAX - 1)}…` : trimmed;
+  // Sanitize the free-form lesson BEFORE the 120-char truncation, so an embedded newline/control char
+  // can never break the single-line `revo inbox list` table output.
+  const sanitized = sanitizeTitle(lesson).trim();
+  if (sanitized === '') return `${role || 'step'} needs approval`;
+  return sanitized.length > TITLE_MAX ? `${sanitized.slice(0, TITLE_MAX - 1)}…` : sanitized;
 }
 
 export function buildInboxRow(args: {
@@ -167,22 +191,18 @@ export type ResolveInboxResult = {
   alreadyResolved: boolean;
 };
 
-// Atomic-ish pending→resolved transition built on getRow/patchRow (data-access has NO CAS primitive,
-// data-access.ts:26-33). Correct under the SINGLE-WORKER assumption (one resolution path at a time —
-// the CLI is the only caller this slice). A true conditional / compare-and-set primitive (e.g.
-// patchRowIf(table, id, when, patch)) would slot in HERE later WITHOUT touching resolveInbox — this is
-// the only call site that changes. Returns true iff THIS call won the transition (flipped
-// pending→resolved); false if the row is missing or already resolved.
-async function transitionInboxToResolved(
+// Trailing bookkeeping: stamp the inbox row pending→resolved (+ answer/resolved_by/resolved_at). This is
+// the LAST write of resolveInbox; the STEP's status is the real idempotency lock now (a re-resolve sees
+// the step no longer awaiting_approval and skips the flip), so this write needs no re-read CAS guard. The
+// SINGLE-WORKER assumption still holds (one resolution path at a time — the CLI is the only caller this
+// slice). A true conditional / compare-and-set primitive (e.g. patchRowIf(table, id, when, patch)) would
+// still slot in HERE later WITHOUT touching resolveInbox — this remains the only call site that changes.
+async function writeInboxResolved(
   da: ControlPlaneDataAccess,
   inboxId: string,
   patch: PatchOperation[],
-): Promise<boolean> {
-  const current = await da.getRow('inbox', inboxId);
-  if (!current) return false;
-  if (str(current.data.status) !== 'pending') return false;
+): Promise<void> {
   await da.patchRow('inbox', inboxId, patch);
-  return true;
 }
 
 function approveStepPatch(nowIso: string): PatchOperation[] {
@@ -205,7 +225,7 @@ function rejectStepPatch(nowIso: string, deadReason: string): PatchOperation[] {
   ];
 }
 
-function losingResult(
+function alreadyResolvedResult(
   inboxId: string,
   stepId: string,
   decision: ResolveDecision,
@@ -246,9 +266,10 @@ export async function resolveInbox(
   const previousStatus = str(inbox.data.status);
   const decision = opts.decision;
 
-  // Already resolved (or some other state): no-op, no step patch, no event.
+  // TOP GUARD: if the inbox is already `resolved` (normal double-resolve) — or any non-pending state —
+  // no-op: no step flip, no event, no inbox write. Handles the common re-resolve cleanly.
   if (previousStatus !== 'pending') {
-    return losingResult(inboxId, stepId, decision, previousStatus);
+    return alreadyResolvedResult(inboxId, stepId, decision, previousStatus);
   }
 
   const now = opts.now ?? new Date();
@@ -257,24 +278,26 @@ export async function resolveInbox(
   const answered = Boolean(opts.answer && opts.answer.length > 0);
   const answerText = opts.answer ?? '';
 
-  // 1. WIN the atomic pending→resolved transition FIRST. Only the winner flips the step + emits the
-  //    event. A loser (status moved off 'pending' between our read and the re-read) is a clean no-op.
-  const inboxPatch: PatchOperation[] = [
-    { op: 'replace', path: 'status', value: 'resolved' },
-    { op: 'replace', path: 'resolved_by', value: resolvedBy },
-    { op: 'replace', path: 'resolved_at', value: nowIso },
-  ];
-  if (answered) inboxPatch.push({ op: 'replace', path: 'answer', value: { text: answerText } }); // plain obj; layer serializes
-  const won = await transitionInboxToResolved(da, inboxId, inboxPatch);
-  if (!won) {
-    return losingResult(inboxId, stepId, decision, previousStatus);
-  }
+  // ORDERING (Gitar EDGE fix — the inbox-`resolved` write is now the LAST operation; the STEP's status
+  // is the idempotency lock, NOT the inbox flip):
+  //   1. (above) top guard already returned on missing inbox / already-resolved.
+  //   2. flip the step ONLY if step.status === 'awaiting_approval' (else: no flip, observed status).
+  //   3. emit the inbox_resolved event.
+  //   4. patch the inbox row to `resolved` — TRAILING bookkeeping, the final write.
+  // Why this is safer than the old "inbox-resolved FIRST" order:
+  //   - If the step-flip (#2) FAILS, the inbox stays `pending`, so the whole resolve is safely retryable
+  //     with no stuck step. (Old order: the inbox was already `resolved`, so the step stayed
+  //     awaiting_approval forever and a re-resolve no-op'd — the worst failure mode.)
+  //   - If the inbox-write (#4) FAILS after a successful flip+event, a retry sees the step is no longer
+  //     awaiting_approval (no re-flip) and re-emits ONE extra audit event. A rare DUPLICATE audit event
+  //     is the accepted least-bad failure mode — strictly better than a silently stuck step. The
+  //     single-worker assumption documented on writeInboxResolved still holds; this is the residual.
 
-  // 2. STEP GUARD: flip the parked step only if it is still awaiting_approval.
+  // 1. STEP GUARD: flip the parked step only if it is still awaiting_approval.
   const deadReason = answered ? answerText : 'rejected by human';
   const { stepReadied, stepStatus } = await flipParkedStep(da, stepId, decision, nowIso, deadReason);
 
-  // 3. Append the resolution event (mirror cancel-run.ts:32-40 id + actor shape). Only the winner here.
+  // 2. Append the resolution event (mirror cancel-run.ts:32-40 id + actor shape).
   const suffix = opts.idSuffix && opts.idSuffix.length > 0 ? opts.idSuffix : randomUUID().replaceAll('-', '').slice(0, 8);
   const eventId = `event_${compactStamp(now)}_inbox-resolved_${suffix}`;
   await da.createRow('events', eventId, {
@@ -287,6 +310,15 @@ export async function resolveInbox(
     actor: 'cli',
     created_at: nowIso,
   });
+
+  // 3. LAST WRITE: stamp the inbox row resolved (+ answer/resolved_by/resolved_at). Trailing bookkeeping.
+  const inboxPatch: PatchOperation[] = [
+    { op: 'replace', path: 'status', value: 'resolved' },
+    { op: 'replace', path: 'resolved_by', value: resolvedBy },
+    { op: 'replace', path: 'resolved_at', value: nowIso },
+  ];
+  if (answered) inboxPatch.push({ op: 'replace', path: 'answer', value: { text: answerText } }); // plain obj; layer serializes
+  await writeInboxResolved(da, inboxId, inboxPatch);
 
   return { inboxId, stepId, decision, previousStatus, stepReadied, stepStatus, alreadyResolved: false };
 }
