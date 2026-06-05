@@ -24,3 +24,15 @@ export {
   type StepClock,
 } from './steps.js';
 export { loadRole, loadModelProfile, type Role, type ModelProfile } from './definitions.js';
+export {
+  buildInboxRow,
+  listInbox,
+  formatInboxList,
+  resolveInbox,
+  type InboxRow,
+  type InboxContext,
+  type InboxKind,
+  type InboxItem,
+  type ResolveDecision,
+  type ResolveInboxResult,
+} from './inbox.js';

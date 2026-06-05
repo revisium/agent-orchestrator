@@ -1,10 +1,12 @@
 # Human control: the inbox & gates
 
-> **Status: DRAFT.** Built with the inbox slice.
+> **Status: DRAFT.** The reactive `needsHuman` park is realized by Plan 0009 (`revo inbox list/resolve`);
+> the proactive plan/merge gates via `routing_policy` remain deferred.
 > **Depends on:** [repo-layer-contract.md](./repo-layer-contract.md) (`pushInbox` / `resolveInbox` /
 > `listInbox`) · [control-plane-schema.md](./control-plane-schema.md) (`inbox`, `routing_policy`) ·
 > [architecture-overview.md](./architecture-overview.md) (invariant: a human decision is a status change).
-> **Realized by:** brief §11 / §11.1, built as a slice after the data-access layer (Plan TBD).
+> **Realized by:** brief §11 / §11.1, built as a slice after the data-access layer
+> ([Plan 0009](./plans/0009-inbox-human-approval-resolution.md)).
 
 Everything that needs a human flows into **one** inbox (control plane): plan approval, merge approval, agent
 blocker-questions, alerts (risky op / budget). Never split per project; decisions are signed (`resolved_by`)
@@ -20,9 +22,14 @@ even on the shared queue.
 
 ## Mechanics
 
+`revo inbox list` shows the pending queue; `revo inbox resolve <id> --approve` revives the parked step by
+flipping it back to `ready` (so `claimNextStep` re-picks it on the loop's next turn), and `--reject` marks the
+step `dead`. The proactive plan/merge gates via `routing_policy` remain deferred.
+
 - A parked step → `awaiting_approval`; its branch stops, siblings keep going. The human's `resolveInbox` answer
-  revives the branch on the loop's next turn — a fresh narrow run carrying the context + answer (not a resumed
-  session).
+  revives the branch on the loop's next turn. **This slice:** the existing parked step is revived as-is (flipped
+  back to `ready`); the human's answer is recorded on the inbox row + resolution event but is not yet wired into
+  the revived step's context. Carrying the answer into a fresh narrow run is a follow-up.
 - **Escalation is directed:** an agent's question goes **up** to the architect-agent first; **out** to the human
   only for judgment calls and missing external knowledge.
 - Notification (a light "N new" ping) and resolution (commands / a session) are **different channels**. MVP can

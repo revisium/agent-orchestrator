@@ -11,6 +11,8 @@ import {
   type NewStep,
 } from '../control-plane/steps.js';
 import type { ControlPlaneDataAccess } from '../control-plane/data-access.js';
+import { ControlPlaneError } from '../control-plane/errors.js';
+import { buildInboxRow } from '../control-plane/inbox.js';
 import type { Role, ModelProfile } from '../control-plane/definitions.js';
 import type { RunAgent, AttemptResult } from './runner.js';
 import { buildContext } from './build-context.js';
@@ -114,8 +116,8 @@ async function parkForHuman(
     { op: 'replace', path: 'finished_at', value: nowIso },
   ]);
 
-  // Minimal inbox parking: mark step awaiting_approval, clear lease, append event.
-  // Full pushInbox (inbox row creation + resolution workflow) is deferred.
+  // Inbox parking: mark step awaiting_approval, clear lease, append event, then write the inbox row
+  // (created below) so a human has a queue and a way to resume the chain.
   await da.patchRow('steps', step.id, [
     { op: 'replace', path: 'status', value: 'awaiting_approval' },
     { op: 'replace', path: 'lease_owner', value: '' },
@@ -132,6 +134,31 @@ async function parkForHuman(
     actor: 'orchestrator',
     created_at: nowIso,
   });
+
+  // Inbox row last (the human-visible artifact). Ordering rationale: the step is already
+  // awaiting_approval and the event records the park, so a missing inbox row is recoverable/visible,
+  // whereas a missing step-flip would silently keep the step claimed. The id reuses the park's st/sfx
+  // stem (inbox_<stamp>_<sfx>), so a crash-retry between the step-flip/event-append and this write
+  // recomputes the SAME id — an existing row is SUCCESS, not failure: exactly one pending row per park.
+  const inbox = buildInboxRow({
+    now,
+    idSuffix: sfx,
+    context: {
+      run_id: step.runId,
+      task_id: step.taskId,
+      step_id: step.id,
+      attempt_id: attemptId,
+      role: step.role,
+      lesson: result.lesson ?? '',
+      output: result.output,
+    },
+  });
+  try {
+    await da.createRow('inbox', inbox.id, inbox);
+  } catch (err) {
+    if (!(err instanceof ControlPlaneError && err.code === 'ROW_CONFLICT')) throw err;
+    // Row already exists from a prior park attempt — idempotent no-op.
+  }
 }
 
 type StepOutcome = 'completed' | 'idle' | 'failed';

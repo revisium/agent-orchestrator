@@ -14,7 +14,7 @@ Living page: per-doc draft status, dependencies, and the build-slice roadmap. Up
 | [open-questions](./open-questions.md) | Living | — (tracker) | repo-layer-contract, control-plane-schema |
 | [context-budget](./context-budget.md) | Draft | Plan 0007 (`buildContext`) | repo-layer-contract, control-plane-schema |
 | [runner-contract](./runner-contract.md) | Draft | Plan 0008 (Claude Code headless, TBD) | repo-layer-contract, control-plane-schema, context-budget |
-| [inbox-and-gates](./inbox-and-gates.md) | Draft | Plan 0009 (TBD) | repo-layer-contract, control-plane-schema |
+| [inbox-and-gates](./inbox-and-gates.md) | Draft | Plan 0009 | repo-layer-contract, control-plane-schema |
 | [multi-repo-strategies](./multi-repo-strategies.md) | Draft | Plan 0010 (TBD) | architecture-overview, repo-layer-contract, open-questions |
 
 ## Build-slice roadmap
@@ -32,7 +32,7 @@ Living page: per-doc draft status, dependencies, and the build-slice roadmap. Up
 | [0006 — step-lifecycle verbs](./plans/0006-step-lifecycle-verbs.md) | Draft | hot-path data-access verbs: `claimNextStep`/`startAttempt`/`writeResult`/`failStep`/`createSteps`/`recoverInFlight`; opens `attempts`+`cost_ledger` |
 | [0007 — dumb worker loop](./plans/0007-dumb-worker-loop.md) | Draft | the dumb loop + **stub** runner + minimal roles/model_profiles seed + `loadRole`/`loadModelProfile` (head reads) + `buildContext` + `revo work` |
 | 0008 — Claude Code runner | Not written | real `runAgent` for Claude Code headless: `claude -p`, isolation, timeout, idempotency, result envelope |
-| 0009 — inbox + CLI | Not written | pushInbox/resolveInbox + `inbox/show/approve/answer`; resolves `needsHuman` parks |
+| [0009 — inbox + CLI](./plans/0009-inbox-human-approval-resolution.md) | Draft | parkForHuman writes an inbox row; `revo inbox list`/`resolve` flips the parked step back to ready (approve) or dead (reject) |
 | 0010 — multi-repo strategies | Not written | primitives / engine / strategies |
 | 0011 — GitHub integration | Not written | poll PR/CI/comments + comment sorter |
 | [0017 — PR identity / idempotent integrator](./plans/0017-pr-identity-idempotent-integrator.md) | Draft | integrator find-or-create by branch (prompt) + poller resolves PR number from `head_branch` |

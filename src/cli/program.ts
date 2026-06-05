@@ -4,6 +4,7 @@ import { registerBootstrap } from './commands/bootstrap.js';
 import { registerRevisium } from './commands/revisium.js';
 import { registerRun } from './commands/run.js';
 import { registerWork } from './commands/work.js';
+import { registerInbox } from './commands/inbox.js';
 
 // Read the version from package.json at runtime. A static JSON import is avoided: tsconfig has no
 // resolveJsonModule and package.json lives outside rootDir ("src"). '../../package.json' is correct
@@ -28,5 +29,6 @@ export function buildProgram(): Command {
   registerBootstrap(program);
   registerRun(program);
   registerWork(program);
+  registerInbox(program);
   return program;
 }

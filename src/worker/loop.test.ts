@@ -221,6 +221,7 @@ test('loop: needsHuman parks step and creates no next steps', async () => {
     nextSteps: [],
     costs: [],
     needsHuman: true,
+    lesson: 'needs sign-off',
   }));
 
   tracked.seedStep('step-1');
@@ -239,6 +240,24 @@ test('loop: needsHuman parks step and creates no next steps', async () => {
   const attemptRows = tracked.rows('attempts');
   assert.equal(attemptRows.length, 1, 'exactly one attempt row should exist');
   assert.equal(attemptRows[0]?.data.status, 'paused', 'attempt should be paused after needsHuman park');
+
+  // A single pending inbox row is created for the park.
+  const inboxRows = tracked.rows('inbox');
+  assert.equal(inboxRows.length, 1, 'exactly one inbox row should be created');
+  const inbox = inboxRows[0];
+  assert.equal(inbox.data.status, 'pending', 'inbox row should be pending');
+  assert.equal(inbox.data.kind, 'approval', 'inbox row kind should be approval');
+  assert.equal(inbox.data.step_id, 'step-1');
+  assert.equal(inbox.data.run_id, 'run-1');
+  assert.equal(inbox.data.task_id, 'task-1');
+  assert.ok(inbox.rowId.startsWith('inbox_'), 'inbox id should start with inbox_');
+
+  // context round-trips as a plain object (the tracked fake DA does not run json-fields serialization).
+  const context = inbox.data.context as Record<string, unknown>;
+  assert.equal(typeof context, 'object');
+  assert.equal(context.lesson, 'needs sign-off');
+  assert.deepEqual(context.output, { question: 'approve?' });
+  assert.equal(context.step_id, 'step-1');
 });
 
 // ─── once returns on idle ─────────────────────────────────────────────────────
