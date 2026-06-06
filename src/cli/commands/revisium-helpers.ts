@@ -30,8 +30,9 @@ export async function waitHealthy(url: string, timeoutMs = 120_000): Promise<boo
 
 export function tailLines(path: string, lines: number): string {
   if (!existsSync(path)) return '';
-  const content = readFileSync(path, 'utf8').replace(/[\r\n]+$/, '');
-  return content.split(/\r?\n/).slice(-lines).join('\n');
+  const all = readFileSync(path, 'utf8').split(/\r?\n/);
+  while (all.length > 0 && all[all.length - 1] === '') all.pop();
+  return all.slice(-lines).join('\n');
 }
 
 export function killTree(pid: number, signal: NodeJS.Signals): void {
