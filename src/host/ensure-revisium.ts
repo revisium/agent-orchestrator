@@ -357,7 +357,12 @@ export async function ensureRevisium(
   if (decision.shouldRemove) removeRuntimeIfMatches(rtRecheck!);
 
   const httpPort = await findFreePort(parsePort(options.port, config.preferredPort));
-  const pgPort = await findFreePort(parsePort(options.pgPort, config.preferredPgPort));
+  // CR5: Two independent findFreePort calls can return the same port when their search
+  // bases overlap. If they collide, re-pick pgPort from httpPort+1 to guarantee distinct ports.
+  let pgPort = await findFreePort(parsePort(options.pgPort, config.preferredPgPort));
+  if (pgPort === httpPort) {
+    pgPort = await findFreePort(httpPort + 1);
+  }
   const dataDir = options.data ?? config.dataDir;
 
   return startAndWaitForHealth(
@@ -366,9 +371,14 @@ export async function ensureRevisium(
   );
 }
 
+/** Maximum valid TCP port number (inclusive). */
+const MAX_TCP_PORT = 65535;
+
 /**
  * Read the postmaster.pid file to cross-check the pg port from runtime.json (F3).
  * Returns the pg port if found, or null if the file is absent (older standalone layout).
+ *
+ * CR6: Valid port range is 1–65535 (inclusive). Out-of-range values (e.g. 70000) return null.
  */
 export function readPostmasterPgPort(dataDir: string): number | null {
   const postmasterPid = `${dataDir}/pgdata/postmaster.pid`;
@@ -379,7 +389,7 @@ export function readPostmasterPgPort(dataDir: string): number | null {
     const portStr = lines[3]?.trim();
     if (!portStr) return null;
     const port = Number(portStr);
-    return Number.isInteger(port) && port > 0 ? port : null;
+    return Number.isInteger(port) && port > 0 && port <= MAX_TCP_PORT ? port : null;
   } catch {
     return null;
   }

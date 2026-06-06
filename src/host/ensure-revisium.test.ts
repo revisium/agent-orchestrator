@@ -452,3 +452,53 @@ test('removeRuntimeIfMatches: safe no-op when runtime.json does not exist (F22 a
     else if (existsSync(backupFile)) rmSync(backupFile);
   }
 });
+
+// ── readPostmasterPgPort: port range validation (CR6) ────────────────────────
+//
+// CR6: port values outside 1–65535 must return null.
+
+test('readPostmasterPgPort CR6: port 70000 (out-of-range) → null', async () => {
+  const { readPostmasterPgPort } = await import('./ensure-revisium.js');
+  const tmpDir = join(tmpdir(), `revo-test-pm-cr6-${Date.now()}`);
+  const pgdataDir = join(tmpDir, 'pgdata');
+  mkdirSync(pgdataDir, { recursive: true });
+  // Write a postmaster.pid with port 70000 (above max valid TCP port 65535).
+  writeFileSync(join(pgdataDir, 'postmaster.pid'), '9999\n/tmp/pgdata\n1234567890\n70000\nlocalhost\n', 'utf8');
+
+  try {
+    const result = readPostmasterPgPort(tmpDir);
+    assert.equal(result, null, 'port 70000 is out of the valid TCP range and must return null (CR6)');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('readPostmasterPgPort CR6: port 65535 (max valid) → accepted', async () => {
+  const { readPostmasterPgPort } = await import('./ensure-revisium.js');
+  const tmpDir = join(tmpdir(), `revo-test-pm-cr6b-${Date.now()}`);
+  const pgdataDir = join(tmpDir, 'pgdata');
+  mkdirSync(pgdataDir, { recursive: true });
+  writeFileSync(join(pgdataDir, 'postmaster.pid'), '9999\n/tmp/pgdata\n1234567890\n65535\nlocalhost\n', 'utf8');
+
+  try {
+    const result = readPostmasterPgPort(tmpDir);
+    assert.equal(result, 65535, 'port 65535 is the max valid TCP port and must be accepted (CR6)');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('readPostmasterPgPort CR6: port 0 (below valid range) → null', async () => {
+  const { readPostmasterPgPort } = await import('./ensure-revisium.js');
+  const tmpDir = join(tmpdir(), `revo-test-pm-cr6c-${Date.now()}`);
+  const pgdataDir = join(tmpDir, 'pgdata');
+  mkdirSync(pgdataDir, { recursive: true });
+  writeFileSync(join(pgdataDir, 'postmaster.pid'), '9999\n/tmp/pgdata\n1234567890\n0\nlocalhost\n', 'utf8');
+
+  try {
+    const result = readPostmasterPgPort(tmpDir);
+    assert.equal(result, null, 'port 0 is below the valid TCP range and must return null (CR6)');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

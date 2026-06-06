@@ -18,6 +18,11 @@
  * dev:status <id> — recover-and-wait on an existing workflow id.
  *   Used by the resume acceptance test (E10, F2): after a kill -9, run this command
  *   to have DBOS auto-recover the original workflow and await its result.
+ *
+ * Security (CR1): sanitizeWorkflowID() rejects any id that would allow path traversal
+ * (e.g. '../evil'). Only [A-Za-z0-9_-]+ is accepted. Applied before ANY filesystem
+ * path is built from the id. The ТЗ resume-test id 'wf-resume-1' is valid (letters,
+ * digits, hyphen). Exported for unit tests.
  */
 
 import { join } from 'node:path';
@@ -25,6 +30,24 @@ import type { INestApplicationContext } from '@nestjs/common';
 import type { DbosService } from '../../engine/dbos.service.js';
 import { Command } from 'commander';
 import { getConfig, readRuntime } from '../config.js';
+
+/** Allowed characters in a workflow ID (CR1 path-traversal guard). */
+const WORKFLOW_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Validate a raw workflow ID string and return it unchanged if valid.
+ * Throws a TypeError if the id contains characters outside [A-Za-z0-9_-],
+ * e.g. path separators like '/' or sequences like '../'.
+ * Exported for unit testing.
+ */
+export function sanitizeWorkflowID(raw: string): string {
+  if (!WORKFLOW_ID_PATTERN.test(raw)) {
+    throw new TypeError(
+      `Invalid workflow ID "${raw}": only letters, digits, underscores and hyphens are allowed`,
+    );
+  }
+  return raw;
+}
 
 type PingOptions = {
   sleep: string;
@@ -59,9 +82,21 @@ async function runDevPing(options: PingOptions, app: INestApplicationContext | u
     return;
   }
 
-  const dbosService = await resolveDbosService(app);
-  const workflowID = options.id ?? `dev-ping-${Date.now()}`;
+  // CR1: sanitize the workflow ID before building any filesystem path from it.
+  // Also resolve the effective ID in ONE place (CR3) so the same non-empty ID is passed
+  // consistently into both StartWorkflowParams and the workflow args / marker path.
+  const rawID = options.id ?? `dev-ping-${Date.now()}`;
+  let workflowID: string;
+  try {
+    workflowID = sanitizeWorkflowID(rawID);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exitCode = 1;
+    return;
+  }
+
   const markerFile = resolveMarkerFile(workflowID);
+  const dbosService = await resolveDbosService(app);
 
   console.log(`Starting dev:ping workflow (id=${workflowID}, sleep=${sleepMs}ms)...`);
   const handle = await dbosService.startPingWorkflow(workflowID, sleepMs, markerFile);
@@ -84,29 +119,41 @@ async function runDevStatus(
     return;
   }
 
+  // CR1: sanitize the id argument before building any filesystem path from it.
+  let safeID: string;
+  try {
+    safeID = sanitizeWorkflowID(id);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exitCode = 1;
+    return;
+  }
+
   const dbosService = await resolveDbosService(app);
 
   // F14: check existence first — retrieveWorkflow().getResult() hangs for unknown ids.
-  const existingStatus = await dbosService.getWorkflowStatus(id);
+  const existingStatus = await dbosService.getWorkflowStatus(safeID);
   if (existingStatus === null) {
-    console.error(`workflow ${id} not found`);
+    console.error(`workflow ${safeID} not found`);
     process.exitCode = 1;
     return;
   }
 
-  console.log(`Waiting for workflow ${id} to complete (DBOS auto-recovery active)...`);
-  const result = await dbosService.waitForWorkflow(id);
+  console.log(`Waiting for workflow ${safeID} to complete (DBOS auto-recovery active)...`);
+  const result = await dbosService.waitForWorkflow(safeID);
   if (result === null) {
     // Should not happen after getWorkflowStatus returned non-null, but guard for safety.
-    console.error(`workflow ${id} completed with no result`);
+    console.error(`workflow ${safeID} completed with no result`);
     process.exitCode = 1;
     return;
   }
 
+  // CR2: re-fetch status AFTER the wait completes so we print the final (non-RUNNING) status.
+  const finalStatus = await dbosService.getWorkflowStatus(safeID);
   console.log(`Workflow ID:    ${result.workflowID}`);
-  console.log(`Status:         ${existingStatus.status ?? 'unknown'}`);
+  console.log(`Status:         ${finalStatus?.status ?? 'unknown'}`);
   console.log(`Marker count:   ${result.markerCount}`);
-  console.log(`Marker file:    ${resolveMarkerFile(id)}`);
+  console.log(`Marker file:    ${resolveMarkerFile(safeID)}`);
 }
 
 export function registerDev(program: Command, app?: INestApplicationContext): void {

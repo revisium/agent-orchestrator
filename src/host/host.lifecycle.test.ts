@@ -97,11 +97,13 @@ test('HostLifecycle: postmaster.pid mismatch error message is actionable', () =>
 
 test('HostLifecycle: onApplicationShutdown calls shutdown and does NOT stop the daemon', async () => {
   let unexpectedStopCalled = false;
+  // CR7: track that shutdown() itself WAS actually called.
+  let shutdownCalled = false;
 
   const fakeSvc = {
     setConfig: () => {},
     launch: async () => {},
-    shutdown: async () => {},
+    shutdown: async () => { shutdownCalled = true; },
     // If these were called it would be a bug (Round 3).
     killTree: () => { unexpectedStopCalled = true; },
     removeRuntime: () => { unexpectedStopCalled = true; },
@@ -111,7 +113,7 @@ test('HostLifecycle: onApplicationShutdown calls shutdown and does NOT stop the 
   const lc = new HostLifecycle(fakeSvc);
   await lc.onApplicationShutdown();
 
+  // CR7: assert that shutdown() WAS called (not just that stop-helpers were not called).
+  assert.ok(shutdownCalled, 'dbosService.shutdown() MUST be called on onApplicationShutdown (CR7)');
   assert.ok(!unexpectedStopCalled, 'daemon-stop functions must NOT be called on shutdown (Round 3)');
-  // shutdown() is a no-op here because the service was never launched (launched flag = false).
-  // The launch+shutdown cycle is covered in dbos.service.test.ts.
 });

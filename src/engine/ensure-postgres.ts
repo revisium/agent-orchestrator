@@ -103,11 +103,16 @@ export async function ensurePostgres(
 /**
  * Build the DBOS system database URL from the pid-proven pg port.
  * Single place; never hardcodes the port.
+ *
+ * CR4: user and password are percent-encoded via encodeURIComponent so that
+ * reserved characters (e.g. '@', ':', '/', '%') do not break the URI.
+ * The default credentials ('revisium'/'password') contain no reserved chars
+ * and encode to themselves, so existing behaviour is unchanged.
  */
 export function dbosSystemDatabaseUrl(
   pgPort: number,
   user = 'revisium',
   password = 'password',
 ): string {
-  return `postgresql://${user}:${password}@localhost:${pgPort}/${DBOS_DB_NAME}`;
+  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@localhost:${pgPort}/${DBOS_DB_NAME}`;
 }

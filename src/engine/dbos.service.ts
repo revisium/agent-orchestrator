@@ -32,10 +32,6 @@
 
 import { Injectable } from '@nestjs/common';
 import { DBOS, type WorkflowHandle } from '@dbos-inc/dbos-sdk';
-
-// StartWorkflowParams is not re-exported from the SDK index; extract it from the overload.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type StartWorkflowParams = NonNullable<Parameters<typeof DBOS.startWorkflow<any[], any>>[1]>;
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -136,17 +132,22 @@ export class DbosService {
 
   /**
    * Start the dev:ping durable workflow.
-   * @param workflowID  - Stable id for the resume test (optional; DBOS assigns a UUID if omitted).
+   *
+   * CR3: The effective workflow ID is decided in ONE place (the CLI layer — dev.ts) and
+   * must always be non-empty before calling this method. This keeps StartWorkflowParams
+   * and the workflow args consistent: both see the same stable, non-empty id, so
+   * PingResult.workflowID and marker identity are never empty.
+   *
+   * @param workflowID  - Stable, non-empty id (sanitized by the caller — CR1/CR3).
    * @param sleepMs     - Duration of step2 sleep (default 15 000 ms).
    * @param markerFile  - Path to the durable marker file written by step1.
    */
   async startPingWorkflow(
-    workflowID: string | undefined,
+    workflowID: string,
     sleepMs: number,
     markerFile: string,
   ): Promise<WorkflowHandle<PingResult>> {
-    const params: StartWorkflowParams = workflowID ? { workflowID } : {};
-    return DBOS.startWorkflow(this.pingWorkflow, params)(workflowID ?? '', sleepMs, markerFile);
+    return DBOS.startWorkflow(this.pingWorkflow, { workflowID })(workflowID, sleepMs, markerFile);
   }
 
   /**

@@ -209,3 +209,46 @@ test('ensurePostgres: pg port must come from pid-proven runtime (never hardcoded
   assert.ok(url.includes(`:${provenPort}/`), 'URL must use the provided pg port');
   assert.ok(!url.includes(':15440/'), 'URL must NOT hardcode the preferred default port 15440');
 });
+
+// ── CR4: URL encoding of credentials ─────────────────────────────────────────
+//
+// Reserved URI characters in user/password (e.g. '@', ':', '/', '%') would break the
+// postgresql:// URI if interpolated raw. dbosSystemDatabaseUrl must percent-encode them.
+
+test('dbosSystemDatabaseUrl CR4: password with "@" is percent-encoded', () => {
+  const url = dbosSystemDatabaseUrl(15440, 'revisium', 'p@ssword');
+  // "@" must appear as "%40" in the credentials section, not as a literal "@".
+  assert.ok(url.includes('%40'), 'literal "@" in password must be encoded as %40');
+  assert.ok(
+    !url.match(/^postgresql:\/\/[^:]+:[^@]*@[^@]+@localhost/),
+    'must not have a second literal "@" before the host',
+  );
+});
+
+test('dbosSystemDatabaseUrl CR4: password with ":" is percent-encoded', () => {
+  const url = dbosSystemDatabaseUrl(15440, 'revisium', 'p:ss');
+  assert.ok(url.includes('%3A'), 'literal ":" in password must be encoded as %3A');
+});
+
+test('dbosSystemDatabaseUrl CR4: password with "/" is percent-encoded', () => {
+  const url = dbosSystemDatabaseUrl(15440, 'revisium', 'p/ss');
+  assert.ok(url.includes('%2F'), 'literal "/" in password must be encoded as %2F');
+});
+
+test('dbosSystemDatabaseUrl CR4: default credentials are unchanged (no reserved chars)', () => {
+  // Default "revisium"/"password" contain no reserved characters — encoding must be identity.
+  const url = dbosSystemDatabaseUrl(15440);
+  assert.equal(url, 'postgresql://revisium:password@localhost:15440/dbos',
+    'default credentials must produce the canonical URL unchanged',
+  );
+});
+
+test('dbosSystemDatabaseUrl CR4: user with "@" is percent-encoded', () => {
+  const url = dbosSystemDatabaseUrl(5432, 'user@host', 'pass');
+  assert.ok(url.includes('user%40host'), 'literal "@" in user must be encoded');
+});
+
+test('dbosSystemDatabaseUrl CR4: percent sign in password is double-encoded ("%25")', () => {
+  const url = dbosSystemDatabaseUrl(5432, 'revisium', '50%off');
+  assert.ok(url.includes('50%25off'), 'literal "%" in password must be encoded as %25');
+});
