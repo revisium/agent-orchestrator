@@ -64,16 +64,12 @@ export async function ensurePostgres(
   deps: EnsurePostgresDeps = {},
 ): Promise<void> {
   const { user, password, adminDb } = { ...DEFAULT_CREDS, ...opts };
-  const createClient =
-    deps.createClient ??
-    (() =>
-      new pg.Client({
-        host: 'localhost',
-        port: pgPort,
-        user,
-        password,
-        database: adminDb,
-      }) as unknown as ClientLike);
+  // pg.Client.connect() returns Promise<Client> while ClientLike.connect() returns
+  // Promise<void>; they are structurally compatible at the call sites used here, but
+  // TypeScript requires an explicit cast via unknown to bridge the return-type difference.
+  const pgClientFactory = (): ClientLike =>
+    new pg.Client({ host: 'localhost', port: pgPort, user, password, database: adminDb }) as unknown as ClientLike;
+  const createClient = deps.createClient ?? pgClientFactory;
 
   const client = createClient();
 

@@ -30,7 +30,7 @@ export async function waitHealthy(url: string, timeoutMs = 120_000): Promise<boo
 
 export function tailLines(path: string, lines: number): string {
   if (!existsSync(path)) return '';
-  const content = readFileSync(path, 'utf8').replace(/(?:\r?\n)+$/, '');
+  const content = readFileSync(path, 'utf8').replace(/[\r\n]+$/, '');
   return content.split(/\r?\n/).slice(-lines).join('\n');
 }
 

@@ -75,7 +75,7 @@ type RuntimeSnapshot = Pick<RuntimeState, 'pid' | 'startedAt'>;
  */
 export function removeRuntimeIfMatches(snapshot: RuntimeSnapshot): void {
   const current = readRuntime();
-  if (current && current.pid === snapshot.pid && current.startedAt === snapshot.startedAt) {
+  if (current?.pid === snapshot.pid && current?.startedAt === snapshot.startedAt) {
     removeRuntime();
   }
 }
@@ -207,6 +207,102 @@ export function classifyRuntimeState(
 }
 
 /**
+ * Handle state 3: alive-but-unhealthy daemon.
+ *
+ * Performs a bounded re-poll. Returns `{alreadyRunning:true}` if the daemon becomes
+ * healthy within `recheckMs`. Throws with an actionable message otherwise — never
+ * removes runtime.json, never spawns (would orphan a live process).
+ */
+async function handleAliveUnhealthy(rt: RuntimeState, recheckMs: number): Promise<EnsureResult> {
+  const becameHealthy = await waitHealthy(healthUrl(rt.httpPort), recheckMs);
+  if (becameHealthy) {
+    const freshRt = readRuntime();
+    if (!freshRt) throw new Error('runtime.json disappeared during re-poll');
+    return { runtime: freshRt, alreadyRunning: true };
+  }
+  throw new Error(
+    `Revisium (pid ${rt.pid}) is running but unhealthy — run \`revo revisium stop\` and retry`,
+  );
+}
+
+/**
+ * Perform the "re-poll" branch of state 2: a concurrent start wrote a live-but-unhealthy
+ * runtime — poll for late-up rather than spawning a second daemon.
+ */
+async function recheckRepoll(rtRecheck: RuntimeState, recheckMs: number): Promise<EnsureResult> {
+  const becameHealthy = await waitHealthy(healthUrl(rtRecheck.httpPort), recheckMs);
+  if (becameHealthy) {
+    const freshRt = readRuntime();
+    if (!freshRt) throw new Error('runtime.json disappeared during recheck re-poll');
+    return { runtime: freshRt, alreadyRunning: true };
+  }
+  throw new Error(
+    `Revisium (pid ${rtRecheck.pid}) is running but unhealthy — run \`revo revisium stop\` and retry`,
+  );
+}
+
+type SpawnConfig = {
+  httpPort: number;
+  pgPort: number;
+  dataDir: string;
+  logFile: string;
+  runtimeFile: string;
+};
+
+/**
+ * Spawn the standalone daemon (detached + unref'd) and wait for health.
+ *
+ * Writes extended runtime.json (F8: includes dataDir). On health timeout, kills the
+ * spawned child, removes its runtime.json (compare-and-delete — F19), and throws.
+ *
+ * @returns EnsureResult from the freshly-written runtime.json (F3: pid-proven ports).
+ */
+async function startAndWaitForHealth(cfg: SpawnConfig, timeoutMs: number): Promise<EnsureResult> {
+  const { httpPort, pgPort, dataDir, logFile, runtimeFile } = cfg;
+  const entry = require.resolve('@revisium/standalone/bin/revisium-standalone.js') as string;
+  const out = openSync(logFile, 'a');
+  const child = spawn(
+    process.execPath,
+    [entry, '--port', String(httpPort), '--pg-port', String(pgPort), '--data', dataDir],
+    { detached: true, stdio: ['ignore', out, out] },
+  );
+  closeSync(out);
+
+  if (!child.pid) {
+    throw new Error('Failed to start standalone Revisium: spawn returned no pid');
+  }
+
+  child.unref(); // detached — daemon outlives this process
+
+  // Capture the exact identity of the runtime WE just wrote (F19).
+  const spawnStartedAt = new Date().toISOString();
+  writeFileSync(
+    runtimeFile,
+    JSON.stringify({ httpPort, pgPort, pid: child.pid, startedAt: spawnStartedAt, dataDir }, null, 2),
+  );
+
+  const spawnSnapshot = { pid: child.pid, startedAt: spawnStartedAt };
+  const spawnHealthy = await waitHealthy(healthUrl(httpPort), timeoutMs);
+  if (!spawnHealthy) {
+    // F19: Only removeRuntime() when the file still identifies OUR child (compare-and-delete).
+    const logTail = tailLines(logFile, 20);
+    killTree(child.pid, 'SIGTERM');
+    await waitForExit(child.pid, 20_000);
+    if (isAlive(child.pid)) killTree(child.pid, 'SIGKILL');
+    removeRuntimeIfMatches(spawnSnapshot);
+    throw new Error(
+      `Revisium did not become healthy on ${baseUrl(httpPort)} within ${timeoutMs / 1000}s` +
+        ` — see \`revo revisium logs\`\n${logTail}`,
+    );
+  }
+
+  // Re-read the freshly-written runtime.json (F3: pid-proven ports).
+  const written = readRuntime();
+  if (!written) throw new Error('runtime.json disappeared after successful start');
+  return { runtime: written, alreadyRunning: false };
+}
+
+/**
  * Ensure the Revisium standalone daemon is running and healthy.
  *
  * Three-state logic (F7):
@@ -235,35 +331,14 @@ export async function ensureRevisium(
 
   // ── State 3: alive but unhealthy ─────────────────────────────────────────
   if (stateClass === 'alive-unhealthy') {
-    // Do NOT remove runtime or spawn. Bounded re-poll first.
-    const becameHealthy = await waitHealthy(healthUrl(rt!.httpPort), recheckMs);
-    if (becameHealthy) {
-      // Late-up daemon; proceed with the existing runtime.
-      const freshRt = readRuntime();
-      if (!freshRt) throw new Error('runtime.json disappeared during re-poll');
-      return { runtime: freshRt, alreadyRunning: true };
-    }
-    // Still unhealthy with a live pid — THROW, do not orphan.
-    throw new Error(
-      `Revisium (pid ${rt!.pid}) is running but unhealthy — run \`revo revisium stop\` and retry`,
-    );
+    return handleAliveUnhealthy(rt!, recheckMs);
   }
 
   // ── State 2: no live daemon ───────────────────────────────────────────────
   //
   // F16 / F21 compare-and-delete: re-classify IMMEDIATELY before any removal.
-  // A concurrent process may have written a NEW live runtime.json between our
-  // initial dead-pid snapshot and this point. We must NOT blindly removeRuntime()
-  // and spawn — that would delete the concurrent process's live runtime and
-  // create an orphan daemon.
-  //
-  // Algorithm:
-  //   1. Re-read runtime now (before touching anything).
-  //   2. decideRuntimeAction() returns a RuntimeDecision with both the action AND
-  //      shouldRemove — the identity check lives inside that pure function (F21).
-  //   3. Only call removeRuntimeIfMatches() when decision.shouldRemove is true —
-  //      it is a second guard that confirms the file on disk still matches our
-  //      snapshot (same pid AND startedAt) before deleting.
+  // decideRuntimeAction() encodes both the action AND shouldRemove so the identity
+  // check lives in one tested pure function (F21).
   const rtRecheck = readRuntime();
   const recheckAlive = rtRecheck ? isAlive(rtRecheck.pid) : false;
   const recheckHealthy = rtRecheck && recheckAlive ? await isHealthy(rtRecheck.httpPort) : false;
@@ -274,86 +349,21 @@ export async function ensureRevisium(
   }
 
   if (decision.action === 'repoll') {
-    // Concurrent start wrote a live-but-unhealthy runtime — bounded re-poll (may be mid-startup).
-    const becameHealthy = await waitHealthy(healthUrl(rtRecheck!.httpPort), recheckMs);
-    if (becameHealthy) {
-      const freshRt = readRuntime();
-      if (!freshRt) throw new Error('runtime.json disappeared during recheck re-poll');
-      return { runtime: freshRt, alreadyRunning: true };
-    }
-    // Still unhealthy with a live pid after re-poll — throw rather than orphan.
-    throw new Error(
-      `Revisium (pid ${rtRecheck!.pid}) is running but unhealthy — run \`revo revisium stop\` and retry`,
-    );
+    return recheckRepoll(rtRecheck!, recheckMs);
   }
 
   // action === 'remove-and-spawn' or 'spawn'
-  // decision.shouldRemove is true only when the recheck runtime still matches the
-  // stale snapshot (identity confirmed by decideRuntimeAction — F21).
-  // F22: use removeRuntimeIfMatches(rtRecheck) — NOT bare removeRuntime() — so we
-  // re-read and compare pid+startedAt AT DELETE TIME, identical to the timeout path.
-  // This prevents a concurrent replacement between decideRuntimeAction() and the
-  // actual delete from wiping a live runtime written by another process.
+  // F22: removeRuntimeIfMatches re-reads and checks identity AT DELETE TIME.
   if (decision.shouldRemove) removeRuntimeIfMatches(rtRecheck!);
 
-  // Start + Wait
   const httpPort = await findFreePort(parsePort(options.port, config.preferredPort));
   const pgPort = await findFreePort(parsePort(options.pgPort, config.preferredPgPort));
   const dataDir = options.data ?? config.dataDir;
 
-  const entry = require.resolve('@revisium/standalone/bin/revisium-standalone.js') as string;
-  const out = openSync(config.logFile, 'a');
-  const child = spawn(
-    process.execPath,
-    [entry, '--port', String(httpPort), '--pg-port', String(pgPort), '--data', dataDir],
-    { detached: true, stdio: ['ignore', out, out] },
+  return startAndWaitForHealth(
+    { httpPort, pgPort, dataDir, logFile: config.logFile, runtimeFile: config.runtimeFile },
+    timeoutMs,
   );
-  closeSync(out);
-
-  if (!child.pid) {
-    throw new Error('Failed to start standalone Revisium: spawn returned no pid');
-  }
-
-  child.unref(); // detached — daemon outlives this process
-
-  // Capture the exact identity of the runtime WE just wrote (F19).
-  // The timeout cleanup path uses removeRuntimeIfMatches(spawnSnapshot) so it only
-  // deletes THIS process's runtime.json and never a concurrently-started daemon's file.
-  const spawnStartedAt = new Date().toISOString();
-
-  // Write extended runtime.json (F8: includes dataDir for postmaster.pid cross-check).
-  writeFileSync(
-    config.runtimeFile,
-    JSON.stringify(
-      { httpPort, pgPort, pid: child.pid, startedAt: spawnStartedAt, dataDir },
-      null,
-      2,
-    ),
-  );
-
-  /** Identity snapshot of the runtime WE wrote — used for compare-and-delete on timeout. */
-  const spawnSnapshot = { pid: child.pid, startedAt: spawnStartedAt };
-
-  const spawnHealthy = await waitHealthy(healthUrl(httpPort), timeoutMs);
-  if (!spawnHealthy) {
-    // Cleanup the child WE spawned (not a live-owned daemon).
-    // F19: Only removeRuntime() when the file still identifies OUR child (compare-and-delete).
-    // A concurrent process may have already replaced runtime.json with its own entry.
-    const logTail = tailLines(config.logFile, 20);
-    killTree(child.pid, 'SIGTERM');
-    await waitForExit(child.pid, 20_000);
-    if (isAlive(child.pid)) killTree(child.pid, 'SIGKILL');
-    removeRuntimeIfMatches(spawnSnapshot);
-    throw new Error(
-      `Revisium did not become healthy on ${baseUrl(httpPort)} within ${timeoutMs / 1000}s` +
-        ` — see \`revo revisium logs\`\n${logTail}`,
-    );
-  }
-
-  // Re-read the freshly-written runtime.json (F3: pid-proven ports).
-  const written = readRuntime();
-  if (!written) throw new Error('runtime.json disappeared after successful start');
-  return { runtime: written, alreadyRunning: false };
 }
 
 /**

@@ -89,16 +89,18 @@ export class DbosService {
     );
 
     // Register the workflow (uses bound steps).
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const self = this;
+    // Capture step references via .bind(this) so DBOS sees stable registered functions,
+    // not closures that close over `this` directly (avoids S7740 "do not assign this to self").
+    const markStepBound = this.markStep.bind(this);
+    const sleepStepBound = this.sleepStep.bind(this);
     this.pingWorkflow = DBOS.registerWorkflow(
       async function pingImpl(
         workflowID: string,
         sleepMs: number,
         markerFile: string,
       ): Promise<PingResult> {
-        const markerCount = await self.markStep(workflowID, markerFile);
-        await self.sleepStep(sleepMs);
+        const markerCount = await markStepBound(workflowID, markerFile);
+        await sleepStepBound(sleepMs);
         return { workflowID, markerCount };
       },
       { name: 'pingImpl', className: 'DbosService' },

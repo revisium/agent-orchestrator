@@ -4,12 +4,7 @@ import { buildProgram } from './program.js';
 
 const argv = process.argv;
 
-if (!needsHost(argv)) {
-  // Host-free path: revisium start/stop/status/logs, bootstrap, run, work,
-  // --help, --version, empty/unknown commands.
-  // Nest/DBOS are NOT loaded here — fast and safe for daemon-management commands.
-  await buildProgram().parseAsync(argv);
-} else {
+if (needsHost(argv)) {
   // Host path: dev:ping, dev:status (and future run/work when they move onto DBOS).
   // Nest/DBOS/AppModule are imported lazily so the host-free path never loads them.
   const { NestFactory } = await import('@nestjs/core');
@@ -21,4 +16,9 @@ if (!needsHost(argv)) {
     // onApplicationShutdown → DBOS.shutdown() only; daemon is NOT stopped (Round 3).
     await app.close();
   }
+} else {
+  // Host-free path: revisium start/stop/status/logs, bootstrap, run, work,
+  // --help, --version, empty/unknown commands.
+  // Nest/DBOS are NOT loaded here — fast and safe for daemon-management commands.
+  await buildProgram().parseAsync(argv);
 }
