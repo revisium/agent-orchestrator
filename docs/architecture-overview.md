@@ -85,9 +85,10 @@ Revisium has revisions (commits) and branches. Apply them **selectively**:
   "ADR-worthy" changes where history and rollback matter.
 - **NOT versioned (write to draft, never commit):** the inbox, events, cost/token accounting — high-frequency
   runtime data in Revisium. Committing a status flip would explode the revision count.
-- **Not in Revisium at all:** execution progress (workflow/step status, attempts, leases) lives in **DBOS's
-  Postgres**, never in Revisium. The pre-pivot `steps` / `attempts` runtime tables are gone from the control
-  plane — DBOS owns them. See [control-plane-schema.md](./control-plane-schema.md).
+- **Target — not in Revisium at all:** execution progress (workflow/step status, attempts, leases) will live in
+  **DBOS's Postgres**, never in Revisium. The pre-pivot `steps` / `attempts` runtime tables still exist in code
+  today and are retired from the control plane in the post-MVP cleanup, once DBOS owns progress. See
+  [control-plane-schema.md](./control-plane-schema.md).
 
 ## How a run moves (in essence)
 
