@@ -1,5 +1,11 @@
 # Context budget (buildContext)
 
+> **In force after the DBOS pivot ([ADR-0001](./adr/0001-execution-engine-and-host.md)).** `buildContext` is
+> reused as-is and will be called from a DBOS workflow step. **Target (not yet implemented):** the `lesson` source
+> *will move* from the Revisium `attempts` table — which `src/worker/build-context.ts` still reads today via
+> `da.listRows('attempts', …)` — to DBOS step/attempt history (or a Revisium event), as part of the post-MVP
+> cleanup that retires the legacy step verbs.
+
 > **Status: DRAFT.** Concept is settled; the implementation lands with the data-access layer.
 > **Depends on:** [architecture-overview.md](./architecture-overview.md) (state-not-history) ·
 > [repo-layer-contract.md](./repo-layer-contract.md) (`buildContext`) ·

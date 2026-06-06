@@ -1,5 +1,13 @@
 # Human control: the inbox & gates
 
+> **Updated by the DBOS pivot ([ADR-0001](./adr/0001-execution-engine-and-host.md)) — target mechanic, not yet
+> implemented.** The inbox stays in Revisium (single human queue, signed resolutions). **Today** the worker still
+> parks via `parkForHuman` (patching `steps.status` to `awaiting_approval`); full `pushInbox` + `DBOS.recv`/`send`
+> are not in `src` yet. **The target (Plan 0004, Draft):** the DBOS workflow writes an inbox row and durably waits
+> on `DBOS.recv`, and `revo inbox resolve` signals it with `DBOS.send` (invariant #5) — see
+> [plans/0004-human-gates-via-dbos-inbox.md](./plans/0004-human-gates-via-dbos-inbox.md). Read the step-status
+> mechanics below as the current, pre-pivot behaviour.
+
 > **Status: DRAFT.** Built with the inbox slice.
 > **Depends on:** [repo-layer-contract.md](./repo-layer-contract.md) (`pushInbox` / `resolveInbox` /
 > `listInbox`) · [control-plane-schema.md](./control-plane-schema.md) (`inbox`, `routing_policy`) ·
