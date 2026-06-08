@@ -20,6 +20,7 @@ import { formatRunList, formatRunDetail, formatEventList } from '../../run/inspe
 import type { RunService } from '../../revisium/run.service.js';
 import { withRevisiumService } from './revisium-context.js';
 import { sanitizeWorkflowID } from './dev.js';
+import { pollWorkflowState } from './poll-workflow-state.js';
 
 type StartOptions = {
   stub: boolean;
@@ -60,61 +61,20 @@ async function resolvePipelineService(app: INestApplicationContext) {
 }
 
 /**
- * Terminal DBOS workflow status strings.
- * MAX_RECOVERY_ATTEMPTS_EXCEEDED is included per G10 (cosmetic carry-MINOR).
- */
-const TERMINAL_STATUSES = new Set([
-  'SUCCESS',
-  'ERROR',
-  'CANCELLED',
-  'MAX_RECOVERY_ATTEMPTS_EXCEEDED',
-]);
-
-/**
- * Poll for parked-or-terminal state after enqueueing (0004 §3.6).
+ * runPollWorkflowState — thin wrapper that opens an InboxService context and
+ * delegates to the shared pollWorkflowState helper (poll-workflow-state.ts).
  *
- * A workflow parked in DBOS.recv has status PENDING (no distinct "parked" status).
- * We detect parked by checking for a pending inbox approval row for this run.
- * Terminal: DBOS status is in TERMINAL_STATUSES.
- *
- * Does NOT call waitForWorkflowResult — that would hang forever at a gate.
+ * Extracted to a local wrapper so runStart can call pollWorkflowState without
+ * holding an open Nest context for the full start flow.
  */
-async function pollWorkflowState(
+async function runPollWorkflowState(
   runId: string,
   dbosService: { getWorkflowStatus: (id: string) => Promise<{ status: string } | null> },
-  maxAttempts = 40,
-  intervalMs = 500,
 ): Promise<void> {
   const { InboxService: InboxServiceClass } = await import('../../revisium/inbox.service.js');
-  await withRevisiumService(InboxServiceClass, async (inboxSvc) => {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      // Check for terminal DBOS status first.
-      const wfStatus = await dbosService.getWorkflowStatus(runId);
-      if (wfStatus && TERMINAL_STATUSES.has(wfStatus.status)) {
-        console.log(`status:   ${wfStatus.status}`);
-        return;
-      }
-
-      // Check for a parked gate (pending inbox approval row for this run).
-      const pending = await inboxSvc.listInbox({ runId, status: 'pending' });
-      if (pending.length > 0) {
-        const gateRow = pending[0];
-        if (gateRow) {
-          const ctx = gateRow.context as Record<string, unknown> | null;
-          const topic = ctx?.topic ?? '?';
-          console.log(`parked:   run ${runId} is waiting at the '${String(topic)}' gate`);
-          console.log(`          resolve with: revo inbox resolve ${gateRow.id} --approve|--reject`);
-        }
-        return;
-      }
-
-      // Still running a step — wait and retry.
-      await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
-    }
-
-    // Timed out — report unknown state.
-    console.log('note:     timed out waiting for settled state; check status with: revo run show');
-  });
+  await withRevisiumService(InboxServiceClass, (inboxSvc) =>
+    pollWorkflowState(runId, dbosService, inboxSvc),
+  );
 }
 
 /**
@@ -188,7 +148,7 @@ async function runStart(
     // 0004 §3.6: poll for parked or terminal state. Does NOT block on getResult while parked.
     // The workflow's DBOS checkpoint is durable; closing the host (DBOS.shutdown) while parked is safe.
     console.log('awaiting settled state (parked or terminal)…');
-    await pollWorkflowState(safeRunId, dbosService);
+    await runPollWorkflowState(safeRunId, dbosService);
   } catch (error) {
     if (error instanceof ControlPlaneError) {
       console.error(`Error: ${formatCause(error)}`);

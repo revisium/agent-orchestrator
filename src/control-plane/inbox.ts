@@ -152,11 +152,11 @@ export async function pushInbox(
   // push free of any non-determinism. Only the legacy path (no opts.id) computes now+suffix.
   let id: string;
   const now = opts?.now ?? new Date();
-  if (opts?.id !== undefined) {
-    id = opts.id;
-  } else {
+  if (opts?.id === undefined) {
     const suffix = opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
     id = `inbox_${compactStamp(now)}_${suffix}`;
+  } else {
+    id = opts.id;
   }
   const safeContext = redactSecrets(item.context);
 
@@ -306,7 +306,7 @@ export async function resolveInbox(
   const stepId = typeof inbox.data.step_id === 'string' ? inbox.data.step_id : '';
   if (!stepId) {
     // alert-kind / step-less item (including gate rows): inbox flip is the whole resolve.
-    return { status: status as 'pending' | 'resolved', answer: effectiveAnswer };
+    return { status, answer: effectiveAnswer };
   }
 
   // Re-read the originating step and idempotently complete the unblock.
@@ -317,16 +317,16 @@ export async function resolveInbox(
       { op: 'replace', path: 'status', value: 'ready' },
       { op: 'replace', path: 'input', value: effectiveAnswer },
     ]);
-    return { status: status as 'pending' | 'resolved', answer: effectiveAnswer };
+    return { status, answer: effectiveAnswer };
   }
 
   // step already ready (done state) → clean NO-OP (no warn, no duplicate).
   if (step && step.data.status === 'ready') {
-    return { status: status as 'pending' | 'resolved', answer: effectiveAnswer };
+    return { status, answer: effectiveAnswer };
   }
 
   // step is null OR in an unexpected state (cancelled / re-driven / superseded) →
   // RESURRECTION GUARD: do NOT flip it. Leave the inbox resolved and console.warn.
   console.warn(`resolveInbox: step ${stepId} no longer awaiting_approval; skipping unblock`);
-  return { status: status as 'pending' | 'resolved', answer: effectiveAnswer };
+  return { status, answer: effectiveAnswer };
 }

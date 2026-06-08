@@ -50,7 +50,8 @@ export async function cancelRun(
   }
 
   // G3: fully deterministic event id (no timestamp) — replay-safe (mirrors append-event.ts:56).
-  const eventId = `event_${fnv1a64Hex(`${runId}|run_cancelled`)}`;
+  const cancelKey = runId + '|run_cancelled';
+  const eventId = `event_${fnv1a64Hex(cancelKey)}`;
   try {
     await da.createRow('events', eventId, {
       id: eventId,

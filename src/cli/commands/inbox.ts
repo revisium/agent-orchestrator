@@ -22,6 +22,7 @@ import { ControlPlaneError } from '../../control-plane/index.js';
 import type { InboxService } from '../../revisium/inbox.service.js';
 import type { InboxItem } from '../../control-plane/inbox.js';
 import { withRevisiumService } from './revisium-context.js';
+import { pollWorkflowState } from './poll-workflow-state.js';
 
 /** Topics recognized as gate topics (must match AwaitHuman topics). */
 const GATE_TOPICS = new Set<string>(['plan', 'merge']);
@@ -167,50 +168,6 @@ function isGateRow(item: InboxItem): boolean {
 }
 
 /**
- * Poll for parked-or-terminal state after signaling (mirrors run start polling).
- *
- * Parked detection: a pending inbox row for this runId means the workflow is at a gate.
- * Terminal detection: DBOS workflow status is SUCCESS/ERROR/CANCELLED/MAX_RECOVERY_ATTEMPTS_EXCEEDED.
- */
-async function pollRunState(
-  runId: string,
-  dbos: { getWorkflowStatus: (id: string) => Promise<{ status: string } | null> },
-  inboxSvc: InboxService,
-  maxAttempts = 30,
-  intervalMs = 500,
-): Promise<void> {
-  const TERMINAL_STATUSES = new Set(['SUCCESS', 'ERROR', 'CANCELLED', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED']);
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    // Check for terminal DBOS status first.
-    const wfStatus = await dbos.getWorkflowStatus(runId);
-    if (wfStatus && TERMINAL_STATUSES.has(wfStatus.status)) {
-      console.log(`status:   ${wfStatus.status}`);
-      return;
-    }
-
-    // Check for next parked gate (pending inbox row for this run).
-    const pending = await inboxSvc.listInbox({ runId, status: 'pending' });
-    if (pending.length > 0) {
-      const gateRow = pending[0];
-      if (gateRow) {
-        const ctx = gateRow.context as Record<string, unknown> | null;
-        const topic = ctx?.topic ?? '?';
-        console.log(`parked:   run ${runId} is waiting at the '${String(topic)}' gate`);
-        console.log(`          resolve with: revo inbox resolve ${gateRow.id} --approve|--reject`);
-      }
-      return;
-    }
-
-    // Neither terminal nor parked yet — still running a step. Wait and retry.
-    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  // Timed out polling — report unknown state.
-  console.log('note:     timed out waiting for settled state; check status with: revo run show');
-}
-
-/**
  * InboxResolveDeps — injectable services for `resolveInboxCommand`.
  * Extracted so unit tests can provide fakes without starting NestJS (C4).
  */
@@ -220,6 +177,90 @@ export type InboxResolveDeps = {
   signal: (workflowId: string, topic: string, payload: unknown, idempotencyKey: string) => Promise<void>;
   pollRunState: (runId: string) => Promise<void>;
 };
+
+/**
+ * resolveGatePath — handle the gate-row branch of inbox resolve (G4).
+ * Extracted from resolveInboxCommand to reduce cognitive complexity (S3776).
+ *
+ * Returns true on success, false on validation error (sets process.exitCode=1).
+ */
+async function resolveGatePath(
+  id: string,
+  row: InboxItem,
+  options: ResolveOptions,
+  deps: InboxResolveDeps,
+): Promise<boolean> {
+  const resolvedBy = options.by ?? 'cli';
+
+  // Exactly one of --approve/--reject must be present.
+  if (options.approve && options.reject) {
+    console.error('Error: specify exactly one of --approve or --reject');
+    process.exitCode = 1;
+    return false;
+  }
+  if (!options.approve && !options.reject) {
+    console.error('Error: specify --approve or --reject for a gate row');
+    process.exitCode = 1;
+    return false;
+  }
+
+  const decision = options.approve
+    ? { decision: 'approve' as const, resolvedBy }
+    : { decision: 'reject' as const, resolvedBy };
+
+  // resolveInbox returns the STORED decision (G2) — signal WHAT IS RECORDED, not the raw flag.
+  const result = await deps.resolveInbox(id, decision, resolvedBy);
+
+  if (result.status === 'resolved') {
+    console.log(`note:     already resolved — signaling with stored answer`);
+  }
+
+  // Signal the parked workflow with the STORED answer (G2, G9 canonical order: topic before payload).
+  // idempotencyKey = inbox id → DBOS.send exactly-once (re-resolve collapses by key).
+  const ctx = row.context as Record<string, unknown>;
+  const topic = typeof ctx.topic === 'string' ? ctx.topic : '';
+  await deps.signal(row.runId, topic, result.answer, id);
+
+  console.log(`resolved  ${id}`);
+  console.log(`decision: ${String((result.answer as Record<string, unknown> | null)?.decision ?? result.answer)}`);
+  console.log(`by:       ${resolvedBy}`);
+  console.log('awaiting next gate or completion…');
+
+  // Poll for next-gate/terminal (same logic as run start, §3.6).
+  await deps.pollRunState(row.runId);
+  return true;
+}
+
+/**
+ * resolveNonGatePath — handle the non-gate-row branch of inbox resolve.
+ * Preserved 0002 behavior: table-only resolve, no signal, no host required.
+ * Extracted from resolveInboxCommand to reduce cognitive complexity (S3776).
+ *
+ * Returns true on success, false on validation error (sets process.exitCode=1).
+ */
+async function resolveNonGatePath(
+  id: string,
+  options: ResolveOptions,
+  deps: InboxResolveDeps,
+): Promise<boolean> {
+  if (options.approve || options.reject) {
+    console.error('Error: --approve/--reject is only valid on a gate row (kind=approval with plan/merge topic)');
+    console.error('       for non-gate rows use --answer');
+    process.exitCode = 1;
+    return false;
+  }
+
+  const resolvedBy = options.by ?? 'cli';
+  // Normalize: --answer omitted → null (do NOT pass undefined; patch serializer drops it).
+  const answer: unknown = options.answer !== undefined ? options.answer : null;
+
+  await deps.resolveInbox(id, answer, resolvedBy);
+
+  console.log(`resolved inbox item ${id}`);
+  console.log(`answer: ${JSON.stringify(answer)}`);
+  console.log(`resolved by: ${resolvedBy}`);
+  return true;
+}
 
 /**
  * resolveInboxCommand — testable core of `inbox resolve` (C4).
@@ -239,71 +280,15 @@ export async function resolveInboxCommand(
     return false;
   }
 
-  const resolvedBy = options.by ?? 'cli';
-
   if (isGateRow(row)) {
     // ── GATE PATH (G4) ────────────────────────────────────────────────────
     // Requires --approve|--reject. Signals the parked DBOS workflow. HOST-REQUIRING.
-
-    // Exactly one of --approve/--reject must be present.
-    if (options.approve && options.reject) {
-      console.error('Error: specify exactly one of --approve or --reject');
-      process.exitCode = 1;
-      return false;
-    }
-    if (!options.approve && !options.reject) {
-      console.error('Error: specify --approve or --reject for a gate row');
-      process.exitCode = 1;
-      return false;
-    }
-    // --answer on a gate row is ignored; gate rows use --approve/--reject only.
-
-    const decision = options.approve
-      ? { decision: 'approve' as const, resolvedBy }
-      : { decision: 'reject' as const, resolvedBy };
-
-    // resolveInbox returns the STORED decision (G2) — signal WHAT IS RECORDED, not the raw flag.
-    const result = await deps.resolveInbox(id, decision, resolvedBy);
-
-    if (result.status === 'resolved') {
-      console.log(`note:     already resolved — signaling with stored answer`);
-    }
-
-    // Signal the parked workflow with the STORED answer (G2, G9 canonical order: topic before payload).
-    // idempotencyKey = inbox id → DBOS.send exactly-once (re-resolve collapses by key).
-    const ctx = row.context as Record<string, unknown>;
-    const topic = String(ctx.topic);
-    await deps.signal(row.runId, topic, result.answer, id);
-
-    console.log(`resolved  ${id}`);
-    console.log(`decision: ${String((result.answer as Record<string, unknown> | null)?.decision ?? result.answer)}`);
-    console.log(`by:       ${resolvedBy}`);
-    console.log('awaiting next gate or completion…');
-
-    // Poll for next-gate/terminal (same logic as run start, §3.6).
-    await deps.pollRunState(row.runId);
-    return true;
-  } else {
-    // ── NON-GATE PATH (0002 preserved) ────────────────────────────────────
-    // question/alert/approval-without-topic: table-only resolve, no signal, no host.
-
-    if (options.approve || options.reject) {
-      console.error('Error: --approve/--reject is only valid on a gate row (kind=approval with plan/merge topic)');
-      console.error('       for non-gate rows use --answer');
-      process.exitCode = 1;
-      return false;
-    }
-
-    // Normalize: --answer omitted → null (do NOT pass undefined; patch serializer drops it).
-    const answer: unknown = options.answer !== undefined ? options.answer : null;
-
-    await deps.resolveInbox(id, answer, resolvedBy);
-
-    console.log(`resolved inbox item ${id}`);
-    console.log(`answer: ${JSON.stringify(answer)}`);
-    console.log(`resolved by: ${resolvedBy}`);
-    return true;
+    return resolveGatePath(id, row, options, deps);
   }
+
+  // ── NON-GATE PATH (0002 preserved) ────────────────────────────────────
+  // question/alert/approval-without-topic: table-only resolve, no signal, no host.
+  return resolveNonGatePath(id, options, deps);
 }
 
 async function inboxResolve(
@@ -336,7 +321,7 @@ async function inboxResolve(
     },
     pollRunState: (runId) =>
       withInboxService((svc) =>
-        pollRunState(runId, dbosService ?? { getWorkflowStatus: async () => null }, svc),
+        pollWorkflowState(runId, dbosService ?? { getWorkflowStatus: async () => null }, svc),
       ),
   };
 

@@ -62,7 +62,8 @@ export function makeAwaitHuman(deps: AwaitHumanDeps) {
   ): Promise<Decision> {
     // 1. FULLY deterministic inbox id (no timestamp) so replay/restart never creates a duplicate row.
     //    fnv1a64Hex → 16 hex; `inbox_` + 16 = 22 chars ≤ 64 (mirrors append-event id derivation).
-    const inboxId = `inbox_${fnv1a64Hex(`${runId}|${topic}`)}`;
+    const inboxKey = runId + '|' + topic;
+    const inboxId = `inbox_${fnv1a64Hex(inboxKey)}`;
 
     // 2. Draft write: pending approval row. context carries the topic (OQ-2) so resolve can read it back.
     //    pushInbox catches ROW_CONFLICT internally and returns the same id (no-op on replay) — §3.4a.
