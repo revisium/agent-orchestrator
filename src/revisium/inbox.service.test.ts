@@ -132,3 +132,47 @@ test('InboxService.resolveInbox propagates ROW_NOT_FOUND for unknown id', async 
     (err: unknown) => err instanceof ControlPlaneError && err.code === 'ROW_NOT_FOUND',
   );
 });
+
+// ─── 0004: opts.id forwarding + resolveInbox return type ─────────────────────
+
+test('InboxService.pushInbox with opts.id forwards id to the pure verb (deterministic gate path)', async () => {
+  const transport = makeDraftTransport();
+  const svc = new InboxService(transport);
+  const deterministicId = 'inbox_cafebabecafebabe';
+  const id = await svc.pushInbox(
+    { kind: 'approval', title: 'Gate', context: { topic: 'plan' } },
+    { id: deterministicId },
+  );
+  assert.equal(id, deterministicId, 'service must return the supplied deterministic id verbatim');
+});
+
+test('InboxService.pushInbox without opts.id uses timestamp+suffix (0002 back-compat)', async () => {
+  const transport = makeDraftTransport();
+  const svc = new InboxService(transport);
+  const id = await svc.pushInbox({ kind: 'approval', title: 'Gate', context: {} });
+  assert.ok(typeof id === 'string', 'id must be a string');
+  assert.ok(id.startsWith('inbox_'), 'id must start with inbox_');
+  // NOT the deterministic id (no fixed suffix expected)
+  assert.notEqual(id, 'inbox_cafebabecafebabe');
+});
+
+test('InboxService.resolveInbox returns { status, answer } (G2 forward)', async () => {
+  const inboxId = 'inbox-rt';
+  const stepId = 'step-rt';
+  const transport = makeDraftTransport({
+    [inboxId]: makeFakeRow(inboxId, {
+      ...INBOX_ROW_DATA, id: inboxId, step_id: stepId, status: 'pending',
+    }),
+    [stepId]: makeFakeRow(stepId, { id: stepId, status: 'awaiting_approval', input: 'null' }),
+  });
+  const svc = new InboxService(transport);
+
+  const result = await svc.resolveInbox(inboxId, 'approve', 'alice');
+
+  // G2: must return the stored decision.
+  assert.ok(typeof result === 'object' && result !== null, 'must return an object');
+  assert.ok('status' in result, 'must have status');
+  assert.ok('answer' in result, 'must have answer');
+  // status was 'pending' before this call.
+  assert.equal(result.status, 'pending', 'status before call must be pending');
+});

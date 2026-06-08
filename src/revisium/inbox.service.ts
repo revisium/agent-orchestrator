@@ -9,6 +9,7 @@ import {
   type NewInboxItem,
   type InboxFilter,
   type InboxItem,
+  type ResolveInboxResult,
 } from '../control-plane/inbox.js';
 import { REVISIUM_TRANSPORT_DRAFT } from './tokens.js';
 
@@ -33,8 +34,14 @@ export class InboxService {
     this.da = createControlPlaneDataAccessForTransport(this.draftTransport);
   }
 
-  pushInbox(item: NewInboxItem): Promise<string> {
-    return pushInbox(this.da, item);
+  /**
+   * pushInbox — insert an inbox row. Returns the inbox id.
+   *
+   * G1 (0004): accepts `opts.id` — when present, used verbatim (deterministic gate path).
+   * 0002 CLI callers pass no opts → timestamp+suffix path unchanged (backward-compatible).
+   */
+  pushInbox(item: NewInboxItem, opts?: { id?: string }): Promise<string> {
+    return pushInbox(this.da, item, opts);
   }
 
   listInbox(filter?: InboxFilter): Promise<InboxItem[]> {
@@ -45,8 +52,14 @@ export class InboxService {
     return getInbox(this.da, id);
   }
 
-  /** PURE — no DBOS signal in 0002. The DBOS send/recv coupling is 0004. */
-  resolveInbox(itemId: string, answer: unknown, resolvedBy: string): Promise<void> {
+  /**
+   * resolveInbox — pure status flip + step unblock.
+   *
+   * G2 (0004): now returns the STORED decision `{ status, answer }`.
+   * Gate CLI callers use `result.answer` to signal WHAT IS RECORDED.
+   * 0002 non-gate callers ignore the return — backward-compatible.
+   */
+  resolveInbox(itemId: string, answer: unknown, resolvedBy: string): Promise<ResolveInboxResult> {
     return resolveInbox(this.da, itemId, answer, resolvedBy);
   }
 }

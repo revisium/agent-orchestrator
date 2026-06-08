@@ -14,6 +14,8 @@ const origGetWorkflowStatus = DBOS.getWorkflowStatus.bind(DBOS);
 const origRetrieveWorkflow = DBOS.retrieveWorkflow.bind(DBOS);
 const origRegisterWorkflow = DBOS.registerWorkflow;
 const origRegisterStep = DBOS.registerStep;
+const origSend = DBOS.send.bind(DBOS);
+const origRecv = DBOS.recv.bind(DBOS);
 
 type ConfigArg = Parameters<typeof DBOS.setConfig>[0];
 
@@ -66,6 +68,10 @@ function restoreDbos() {
   (DBOS as any).registerWorkflow = origRegisterWorkflow;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (DBOS as any).registerStep = origRegisterStep;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (DBOS as any).send = origSend;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (DBOS as any).recv = origRecv;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -136,6 +142,79 @@ test('DbosService: shutdown() after launch() calls DBOS.shutdown()', async () =>
     await svc.launch();
     await svc.shutdown();
     assert.equal(shutdownCallCount, 1, 'DBOS.shutdown() must be called once after launch');
+  } finally {
+    restoreDbos();
+  }
+});
+
+// ── 0004 G9: signal reorder assertion + awaitDecision deadline ────────────────
+
+test('DbosService.signal: wrapper canonical order (workflowId,topic,payload,idemKey) reorders to raw DBOS.send(workflowId,payload,topic,idemKey) (G9)', async () => {
+  patchDbos({});
+  // Capture DBOS.send args.
+  let sendArgs: unknown[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (DBOS as any).send = async (...args: unknown[]) => { sendArgs = args; };
+
+  try {
+    const { DbosService } = await import('./dbos.service.js');
+    const svc = new DbosService();
+
+    const workflowId = 'wf-123';
+    const topic = 'plan';
+    const payload = { decision: 'approve' };
+    const idempotencyKey = 'inbox_abc';
+
+    // Call with WRAPPER canonical order: (workflowId, topic, payload, idempotencyKey).
+    await svc.signal(workflowId, topic, payload, idempotencyKey);
+
+    // DBOS.send receives RAW order: (destinationID, message, topic, idempotencyKey).
+    // The wrapper REORDERS: topic ↔ payload are swapped inside signal().
+    assert.equal(sendArgs[0], workflowId, 'arg0 = workflowId (destinationID)');
+    assert.equal(sendArgs[1], payload, 'arg1 = payload (message) — WRAPPER REORDERS: topic↔payload');
+    assert.equal(sendArgs[2], topic, 'arg2 = topic — WRAPPER REORDERS: was arg1 in wrapper');
+    assert.equal(sendArgs[3], idempotencyKey, 'arg3 = idempotencyKey');
+  } finally {
+    restoreDbos();
+  }
+});
+
+test('DbosService.awaitDecision: passes topic and far-future deadlineEpochMS to DBOS.recv (G5)', async () => {
+  patchDbos({});
+  let recvArgs: unknown[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (DBOS as any).recv = async (...args: unknown[]) => { recvArgs = args; return null; };
+
+  try {
+    const { DbosService, GATE_DEADLINE_EPOCH_MS } = await import('./dbos.service.js');
+    const svc = new DbosService();
+
+    await svc.awaitDecision('plan');
+
+    assert.equal(recvArgs[0], 'plan', 'recv arg0 must be the topic');
+    const opts = recvArgs[1] as Record<string, unknown>;
+    assert.ok(opts && typeof opts === 'object', 'recv arg1 must be the options object');
+    assert.equal(opts.deadlineEpochMS, GATE_DEADLINE_EPOCH_MS, 'deadlineEpochMS must equal GATE_DEADLINE_EPOCH_MS');
+    // Verify the constant value matches the spec (year 2100).
+    assert.equal(GATE_DEADLINE_EPOCH_MS, 4102444800000, 'GATE_DEADLINE_EPOCH_MS must be 4102444800000 (year 2100)');
+  } finally {
+    restoreDbos();
+  }
+});
+
+test('DbosService.signal: idempotencyKey is optional — undefined not passed when omitted', async () => {
+  patchDbos({});
+  let sendArgs: unknown[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (DBOS as any).send = async (...args: unknown[]) => { sendArgs = args; };
+
+  try {
+    const { DbosService } = await import('./dbos.service.js');
+    const svc = new DbosService();
+
+    await svc.signal('wf-id', 'plan', { decision: 'approve' });
+    // arg3 is idempotencyKey (undefined when not passed) — DBOS accepts undefined.
+    assert.equal(sendArgs[3], undefined, 'idempotencyKey must be undefined when not supplied');
   } finally {
     restoreDbos();
   }

@@ -110,3 +110,45 @@ test('needsHost: dev:ping --id wf-1 → true', () => {
 test('needsHost: dev:status <id> → true', () => {
   assert.equal(needsHost(argv('dev:status', 'wf-resume-1')), true);
 });
+
+// ── 0004 G4/G6: inbox resolve gate detection ─────────────────────────────────
+
+test('needsHost: inbox resolve <id> --approve → true (gate path, host-requiring)', () => {
+  assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1', '--approve')), true);
+});
+
+test('needsHost: inbox resolve <id> --reject → true (gate path, host-requiring)', () => {
+  assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1', '--reject')), true);
+});
+
+test('needsHost: inbox resolve <id> --approve --by alice → true', () => {
+  assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1', '--approve', '--by', 'alice')), true);
+});
+
+test('needsHost: inbox resolve <id> --answer "yes" → false (non-gate, host-free)', () => {
+  assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1', '--answer', 'yes')), false);
+});
+
+test('needsHost: inbox resolve <id> (no flags) → false (host-free)', () => {
+  assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1')), false);
+});
+
+test('needsHost: inbox list → false', () => {
+  assert.equal(needsHost(argv('inbox', 'list')), false);
+});
+
+test('needsHost: inbox list --status pending → false', () => {
+  assert.equal(needsHost(argv('inbox', 'list', '--status', 'pending')), false);
+});
+
+test('needsHost: inbox show <id> → false', () => {
+  assert.equal(needsHost(argv('inbox', 'show', 'inbox-1')), false);
+});
+
+test('needsHost: inbox resolve --approve --help → false (help flag wins)', () => {
+  assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1', '--approve', '--help')), false);
+});
+
+test('needsHost: inbox resolve --reject -h → false (help flag wins)', () => {
+  assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1', '--reject', '-h')), false);
+});

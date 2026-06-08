@@ -40,6 +40,8 @@ import type { Step } from '../control-plane/steps.js';
 import type { ControlPlaneDataAccess } from '../control-plane/data-access.js';
 import { ControlPlaneError } from '../control-plane/errors.js';
 import type { AppendEventInput, AppendCostInput } from '../run/append-event.js';
+import type { Decision } from './await-human.js';
+import type { CancelRunResult } from '../run/cancel-run.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -134,6 +136,7 @@ type Harness = {
   loadRoleArgs: string[];
   appendEventArgs: Array<{ stepKey: string; type: string }>;
   appendEventInputs: AppendEventInput[];
+  cancelRunArgs: string[];
 };
 
 /**
@@ -144,11 +147,14 @@ type Harness = {
  *
  * A controlled `reviewerResults` sequence overrides the stubRunAgent for the reviewer role
  * by swapping the real `runAgent` with a fake for reviewer calls only.
+ *
+ * `awaitHumanResults` controls gate decisions: defaults to approve for both gates.
  */
 function buildDeps(opts: {
   runId: string;
   roles?: Map<string, Role>;
   reviewerResults?: Array<{ verdict: string }>;
+  awaitHumanResults?: Partial<Record<'plan' | 'merge', Decision>>;
 }): {
   deps: RunStepDeps;
   workflowDeps: DevelopTaskDeps;
@@ -159,6 +165,7 @@ function buildDeps(opts: {
     loadRoleArgs: [],
     appendEventArgs: [],
     appendEventInputs: [],
+    cancelRunArgs: [],
   };
 
   const defaultRoles = new Map<string, Role>([
@@ -226,7 +233,24 @@ function buildDeps(opts: {
     runAgent,
   };
 
-  const workflowDeps: DevelopTaskDeps = { appendEvent };
+  // awaitHuman fake — defaults to approve for all gates; can be overridden per topic.
+  const awaitHumanResults = opts.awaitHumanResults ?? {};
+  const awaitHuman = async (
+    _runId: string,
+    topic: 'plan' | 'merge',
+    _title: string,
+    _summary: unknown,
+  ): Promise<Decision> => {
+    return awaitHumanResults[topic] ?? { decision: 'approve' };
+  };
+
+  // cancelRun fake — records the runId.
+  const cancelRun = async (runId: string): Promise<CancelRunResult | null> => {
+    harness.cancelRunArgs.push(runId);
+    return { runId, previousStatus: 'running', status: 'cancelled' };
+  };
+
+  const workflowDeps: DevelopTaskDeps = { appendEvent, awaitHuman, cancelRun };
 
   return { deps, workflowDeps, harness, throwingClaudeCode };
 }
@@ -325,6 +349,7 @@ test('T2: makeDevelopTask drives full chain; loadRole args are always canonical'
   const result = await developTaskImpl(runId, { runnerOverride: 'script' });
 
   assert.equal(result.blocked, false);
+  assert.equal(result.cancelled, false);
   assert.equal(result.iterations, 0);
   assert.equal(result.verdict, 'PASS');
 
@@ -361,6 +386,7 @@ test('T3a: BLOCKER twice then PASS → loop runs twice, integrator runs', async 
   const result = await developTaskImpl(runId, { runnerOverride: 'script' });
 
   assert.equal(result.blocked, false, 'should not be blocked after PASS');
+  assert.equal(result.cancelled, false);
   assert.equal(result.iterations, 2);
   assert.equal(result.verdict, 'PASS');
 
@@ -432,6 +458,7 @@ test('T4a: runnerOverride=script with claude-code seeded roles → stub runs (ne
   const result = await developTaskImpl(runId, { runnerOverride: 'script' });
 
   assert.equal(result.blocked, false, 'chain should complete via stub');
+  assert.equal(result.cancelled, false);
   // All 4 canonical roles were exercised (chain completed)
   assert.ok(harness.loadRoleArgs.includes('architect'));
   assert.ok(harness.loadRoleArgs.includes('developer'));
@@ -601,6 +628,133 @@ test('AC3: startDevelopTask forwards runId+opts to startWorkflowOn (structural c
   assert.equal(calls[0]?.workflowID, 'run-ac3');
   assert.equal(calls[0]?.queueName, 'dev-tasks');
   assert.deepEqual(calls[0]?.args, ['run-ac3', { runnerOverride: 'script' }]);
+});
+
+// ─── Gate tests (A4–A7, 0004) ────────────────────────────────────────────────
+
+test('A4: full chain plan-approve + merge-approve → all steps run, cancelled:false', async () => {
+  const runId = 'run-a4';
+  const { deps, workflowDeps, harness } = buildDeps({
+    runId,
+    awaitHumanResults: { plan: { decision: 'approve' }, merge: { decision: 'approve' } },
+  });
+
+  const runStepImpl = makeRunStep(deps);
+  const developTaskImpl = makeDevelopTask(runStepImpl, workflowDeps);
+  const result = await developTaskImpl(runId, { runnerOverride: 'script' });
+
+  assert.equal(result.cancelled, false);
+  assert.equal(result.blocked, false);
+  // All canonical roles ran
+  assert.ok(harness.loadRoleArgs.includes('architect'), 'architect not loaded');
+  assert.ok(harness.loadRoleArgs.includes('developer'), 'developer not loaded');
+  assert.ok(harness.loadRoleArgs.includes('reviewer'), 'reviewer not loaded');
+  assert.ok(harness.loadRoleArgs.includes('integrator'), 'integrator not loaded');
+  // cancelRun was NOT called
+  assert.equal(harness.cancelRunArgs.length, 0, 'cancelRun must not be called on approve');
+  // step_succeeded events written for all four steps (fake awaitHuman doesn't emit gate events)
+  const stepSucceeded = harness.appendEventArgs.filter((e) => e.type === 'step_succeeded');
+  assert.equal(stepSucceeded.length, 4, 'four step_succeeded events expected (architect, developer, reviewer, integrator)');
+});
+
+test('A5: plan-reject → cancelRun called, gate_rejected event, cancelled:true, no developer/reviewer/integrator', async () => {
+  const runId = 'run-a5';
+  const { deps, workflowDeps, harness } = buildDeps({
+    runId,
+    awaitHumanResults: { plan: { decision: 'reject' } },
+  });
+
+  const runStepImpl = makeRunStep(deps);
+  const developTaskImpl = makeDevelopTask(runStepImpl, workflowDeps);
+  const result = await developTaskImpl(runId, { runnerOverride: 'script' });
+
+  assert.equal(result.cancelled, true, 'cancelled must be true on plan reject');
+  assert.equal(result.verdict, 'CANCELLED');
+  // cancelRun was called once with the runId
+  assert.equal(harness.cancelRunArgs.length, 1, 'cancelRun must be called on plan reject');
+  assert.equal(harness.cancelRunArgs[0], runId);
+  // gate_rejected event written for plan
+  const rejected = harness.appendEventArgs.filter((e) => e.type === 'gate_rejected');
+  assert.equal(rejected.length, 1, 'one gate_rejected event expected (plan)');
+  assert.equal(rejected[0]?.stepKey, 'gate:plan');
+  // developer, reviewer, integrator must NOT have run
+  assert.ok(!harness.loadRoleArgs.includes('developer'), 'developer must NOT run on plan reject');
+  assert.ok(!harness.loadRoleArgs.includes('reviewer'), 'reviewer must NOT run on plan reject');
+  assert.ok(!harness.loadRoleArgs.includes('integrator'), 'integrator must NOT run on plan reject');
+});
+
+test('A6: merge-reject → workflow ends normally (NOT cancelled), gate_rejected event', async () => {
+  const runId = 'run-a6';
+  const { deps, workflowDeps, harness } = buildDeps({
+    runId,
+    awaitHumanResults: { plan: { decision: 'approve' }, merge: { decision: 'reject' } },
+  });
+
+  const runStepImpl = makeRunStep(deps);
+  const developTaskImpl = makeDevelopTask(runStepImpl, workflowDeps);
+  const result = await developTaskImpl(runId, { runnerOverride: 'script' });
+
+  // E12/OQ-3: merge reject ⇒ work done, merge declined; run NOT cancelled.
+  assert.equal(result.cancelled, false, 'merge reject must NOT set cancelled:true');
+  assert.equal(result.blocked, false);
+  // cancelRun was NOT called
+  assert.equal(harness.cancelRunArgs.length, 0, 'cancelRun must not be called on merge reject');
+  // gate_rejected event for merge
+  const mergeRejected = harness.appendEventArgs.filter(
+    (e) => e.type === 'gate_rejected' && e.stepKey === 'gate:merge',
+  );
+  assert.equal(mergeRejected.length, 1, 'one gate_rejected event for merge expected');
+});
+
+test('A7: gate ordering — plan gate strictly before developer; merge gate strictly after integrator', async () => {
+  const runId = 'run-a7';
+  const stepOrder: string[] = [];
+
+  const { deps, workflowDeps } = buildDeps({
+    runId,
+    awaitHumanResults: { plan: { decision: 'approve' }, merge: { decision: 'approve' } },
+  });
+
+  // Wrap deps.appendEvent (shared recorder used by both makeRunStep and makeDevelopTask) to
+  // capture step_succeeded events. Gate timing is captured via awaitHuman wrapper below.
+  const origDepsAppendEvent = deps.appendEvent;
+  deps.appendEvent = async (input) => {
+    stepOrder.push(`${input.stepKey}:${input.type}`);
+    return origDepsAppendEvent(input);
+  };
+  // Also wrap workflowDeps.appendEvent (used for workflow-level events like pipeline_blocked).
+  const origWorkflowAppendEvent = workflowDeps.appendEvent;
+  workflowDeps.appendEvent = async (input) => {
+    stepOrder.push(`${input.stepKey}:${input.type}`);
+    return origWorkflowAppendEvent(input);
+  };
+
+  const origAwaitHuman = workflowDeps.awaitHuman;
+  workflowDeps.awaitHuman = async (rId, topic, title, summary) => {
+    stepOrder.push(`gate:${topic}:await`);
+    return origAwaitHuman(rId, topic, title, summary);
+  };
+
+  const runStepImpl = makeRunStep(deps);
+  const developTaskImpl = makeDevelopTask(runStepImpl, workflowDeps);
+  await developTaskImpl(runId, { runnerOverride: 'script' });
+
+  // Plan gate must appear after architect but before developer.
+  const architectIdx = stepOrder.findIndex((s) => s === 'architect:step_succeeded');
+  const planGateIdx = stepOrder.findIndex((s) => s === 'gate:plan:await');
+  const developerIdx = stepOrder.findIndex((s) => s === 'developer:step_succeeded');
+  const integratorIdx = stepOrder.findIndex((s) => s === 'integrator:step_succeeded');
+  const mergeGateIdx = stepOrder.findIndex((s) => s === 'gate:merge:await');
+
+  assert.ok(architectIdx >= 0, `architect event must appear; stepOrder=${JSON.stringify(stepOrder)}`);
+  assert.ok(planGateIdx >= 0, `plan gate must appear; stepOrder=${JSON.stringify(stepOrder)}`);
+  assert.ok(developerIdx >= 0, `developer event must appear; stepOrder=${JSON.stringify(stepOrder)}`);
+  assert.ok(integratorIdx >= 0, `integrator event must appear; stepOrder=${JSON.stringify(stepOrder)}`);
+  assert.ok(mergeGateIdx >= 0, `merge gate must appear; stepOrder=${JSON.stringify(stepOrder)}`);
+
+  assert.ok(architectIdx < planGateIdx, 'architect must precede plan gate');
+  assert.ok(planGateIdx < developerIdx, 'plan gate must precede developer');
+  assert.ok(integratorIdx < mergeGateIdx, 'integrator must precede merge gate');
 });
 
 // ─── C2: DbosService.waitForWorkflowResult generic verb ──────────────────────

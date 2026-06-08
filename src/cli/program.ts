@@ -40,7 +40,7 @@ export function buildProgram(app?: INestApplicationContext): Command {
   registerBootstrap(program);
   registerRun(program, app);
   registerWork(program);
-  registerInbox(program);
+  registerInbox(program, app); // G6: forward app so gate resolve path can access DbosService
   registerDev(program, app);
   return program;
 }

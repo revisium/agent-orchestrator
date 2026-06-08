@@ -60,6 +60,64 @@ async function resolvePipelineService(app: INestApplicationContext) {
 }
 
 /**
+ * Terminal DBOS workflow status strings.
+ * MAX_RECOVERY_ATTEMPTS_EXCEEDED is included per G10 (cosmetic carry-MINOR).
+ */
+const TERMINAL_STATUSES = new Set([
+  'SUCCESS',
+  'ERROR',
+  'CANCELLED',
+  'MAX_RECOVERY_ATTEMPTS_EXCEEDED',
+]);
+
+/**
+ * Poll for parked-or-terminal state after enqueueing (0004 §3.6).
+ *
+ * A workflow parked in DBOS.recv has status PENDING (no distinct "parked" status).
+ * We detect parked by checking for a pending inbox approval row for this run.
+ * Terminal: DBOS status is in TERMINAL_STATUSES.
+ *
+ * Does NOT call waitForWorkflowResult — that would hang forever at a gate.
+ */
+async function pollWorkflowState(
+  runId: string,
+  dbosService: { getWorkflowStatus: (id: string) => Promise<{ status: string } | null> },
+  maxAttempts = 40,
+  intervalMs = 500,
+): Promise<void> {
+  const { InboxService: InboxServiceClass } = await import('../../revisium/inbox.service.js');
+  await withRevisiumService(InboxServiceClass, async (inboxSvc) => {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Check for terminal DBOS status first.
+      const wfStatus = await dbosService.getWorkflowStatus(runId);
+      if (wfStatus && TERMINAL_STATUSES.has(wfStatus.status)) {
+        console.log(`status:   ${wfStatus.status}`);
+        return;
+      }
+
+      // Check for a parked gate (pending inbox approval row for this run).
+      const pending = await inboxSvc.listInbox({ runId, status: 'pending' });
+      if (pending.length > 0) {
+        const gateRow = pending[0];
+        if (gateRow) {
+          const ctx = gateRow.context as Record<string, unknown> | null;
+          const topic = ctx?.topic ?? '?';
+          console.log(`parked:   run ${runId} is waiting at the '${String(topic)}' gate`);
+          console.log(`          resolve with: revo inbox resolve ${gateRow.id} --approve|--reject`);
+        }
+        return;
+      }
+
+      // Still running a step — wait and retry.
+      await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+    }
+
+    // Timed out — report unknown state.
+    console.log('note:     timed out waiting for settled state; check status with: revo run show');
+  });
+}
+
+/**
  * run start <id> [--stub]
  *
  * Host-requiring: enqueues the developTask DBOS workflow for the given runId.
@@ -69,6 +127,10 @@ async function resolvePipelineService(app: INestApplicationContext) {
  * start; a subsequent `run start --stub` on an already-started run returns the existing
  * handle and does NOT switch the runner (DBOS does not overwrite persisted args).
  * To switch, create a NEW run (new runId) and start that with --stub.
+ *
+ * 0004 §3.6: no longer blocks on waitForWorkflowResult (the workflow parks at recv).
+ * Instead, polls getWorkflowStatus (terminal) + listInbox (parked) and returns once settled.
+ * The workflow's DBOS checkpoint persists; shutting down the host while parked is safe.
  */
 async function runStart(
   runId: string,
@@ -123,17 +185,10 @@ async function runStart(
       }
     }
 
-    // C2: await the workflow to completion before the CLI closes the Nest app.
-    // This ensures `app.close()` / DBOS.shutdown() does not race the workflow.
-    // On a re-run (existing workflow): re-attaches to the existing handle and waits —
-    // does NOT double-enqueue (startDevelopTask is idempotent by workflowID=runId).
-    console.log('awaiting workflow completion…');
-    const result = await dbosService.waitForWorkflowResult<{ runId: string; blocked: boolean; iterations: number; verdict: string }>(handle.workflowID);
-    if (result) {
-      console.log(`done:     runId=${result.runId}  blocked=${result.blocked}  verdict=${result.verdict}  iterations=${result.iterations}`);
-    }
-    const finalStatus = await dbosService.getWorkflowStatus(handle.workflowID);
-    console.log(`status:   ${finalStatus?.status ?? 'UNKNOWN'}`);
+    // 0004 §3.6: poll for parked or terminal state. Does NOT block on getResult while parked.
+    // The workflow's DBOS checkpoint is durable; closing the host (DBOS.shutdown) while parked is safe.
+    console.log('awaiting settled state (parked or terminal)…');
+    await pollWorkflowState(safeRunId, dbosService);
   } catch (error) {
     if (error instanceof ControlPlaneError) {
       console.error(`Error: ${formatCause(error)}`);
