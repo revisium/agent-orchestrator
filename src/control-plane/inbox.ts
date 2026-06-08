@@ -25,6 +25,14 @@ import type { ControlPlaneDataAccess } from './data-access.js';
 import { ControlPlaneError } from './errors.js';
 import { compactStamp } from './steps.js'; // NOT from ./index.js — compactStamp is not re-exported there
 
+/** Return type for resolveInbox (G2): carries the STORED decision so callers signal what is recorded. */
+export type ResolveInboxResult = {
+  /** Status of the inbox row BEFORE this call (pending ⇒ just resolved; resolved ⇒ already was). */
+  status: 'pending' | 'resolved';
+  /** Effective stored answer (first-resolver wins; retry gets the STORED value, not its arg). */
+  answer: unknown;
+};
+
 // ─── domain types ────────────────────────────────────────────
 
 export type InboxKind = 'approval' | 'question' | 'alert';
@@ -121,39 +129,76 @@ function mapInboxRow(rowId: string, data: Record<string, unknown>): InboxItem {
  * `replace` patches hit present paths (serializeData omits undefined fields, leaving
  * absent paths that Revisium's patch handler rejects for `replace`).
  *
+ * G1 (0004): accepts `opts.id` — when present, used VERBATIM (bypassing compactStamp+suffix).
+ * This is the fully-deterministic path used by gate pushes in the workflow body.
+ * Legacy callers pass no `id` → timestamp+suffix path is unchanged (backward-compatible).
+ *
+ * G1 idempotency: wraps createRow in a ROW_CONFLICT catch (mirrors append-event.ts:69-72).
+ * On a workflow-body replay the row already exists → swallows the conflict and returns the
+ * same id (no-op, no duplicate). Gate rows carry no stepId, so the step-park branch is moot
+ * on ROW_CONFLICT; we return before it.
+ *
  * Redacts secrets in context before writing (contract line 163).
  */
 export async function pushInbox(
   da: ControlPlaneDataAccess,
   item: NewInboxItem,
-  opts?: { now?: Date; idSuffix?: string },
+  opts?: { now?: Date; idSuffix?: string; id?: string },
 ): Promise<string> {
   await da.assertReady();
-  const now = opts?.now ?? new Date();
-  const suffix = opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
-  const id = `inbox_${compactStamp(now)}_${suffix}`;
+
+  // CR-C (0004 CR): avoid computing non-deterministic values on the deterministic gate path.
+  // When opts.id is present, we do NOT call new Date() until we are inside the actual insert —
+  // at which point ROW_CONFLICT makes the row exactly-once (first write wins; any replayed
+  // new Date() is discarded by the conflict and never persisted). The timestamp is a real wall-
+  // clock value on the FIRST insert and is irrelevant on replay. Only the legacy path (no
+  // opts.id) needs now for the id itself, so it is computed first in that branch only.
+  let id: string;
+  let now: Date;
+  if (opts?.id === undefined) {
+    // Legacy path: timestamp is part of the id — must be computed before createRow.
+    now = opts?.now ?? new Date();
+    const suffix = opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
+    id = `inbox_${compactStamp(now)}_${suffix}`;
+  } else {
+    // Deterministic gate path: id is caller-supplied verbatim; timestamp is only needed
+    // for created_at in the insert — evaluated lazily inside the try block below.
+    id = opts.id;
+    // Use opts.now if provided (test-seeded), otherwise defer new Date() to the insert.
+    now = opts?.now ?? new Date();
+  }
   const safeContext = redactSecrets(item.context);
 
-  await da.createRow('inbox', id, {
-    id,
-    kind: item.kind,
-    run_id: item.runId ?? '',
-    task_id: item.taskId ?? '',
-    step_id: item.stepId ?? '',
-    project_id: item.projectId ?? '',
-    title: item.title,
-    context: safeContext,
-    options: item.options ?? [],
-    status: 'pending',
-    // G10 — seed every later-patched optional column as a present value (never undefined).
-    // serializeData (json-fields.ts:38) omits undefined fields; an absent path causes
-    // Revisium's patch handler to reject a replace → resolveInbox patches would fail.
-    // answer: null is serialized by json-fields as JSON null → 'null' string on the JSON field.
-    answer: null,
-    resolved_by: '',
-    resolved_at: '',
-    created_at: now.toISOString(),
-  });
+  try {
+    await da.createRow('inbox', id, {
+      id,
+      kind: item.kind,
+      run_id: item.runId ?? '',
+      task_id: item.taskId ?? '',
+      step_id: item.stepId ?? '',
+      project_id: item.projectId ?? '',
+      title: item.title,
+      context: safeContext,
+      options: item.options ?? [],
+      status: 'pending',
+      // G10 — seed every later-patched optional column as a present value (never undefined).
+      // serializeData (json-fields.ts:38) omits undefined fields; an absent path causes
+      // Revisium's patch handler to reject a replace → resolveInbox patches would fail.
+      // answer: null is serialized by json-fields as JSON null → 'null' string on the JSON field.
+      answer: null,
+      resolved_by: '',
+      resolved_at: '',
+      // On the opts.id (gate) path, created_at uses `now` computed above. On a workflow-body
+      // replay, ROW_CONFLICT fires BEFORE this value is persisted — so a different now per
+      // replay is harmless (it is discarded). The FIRST insert's timestamp is the real one.
+      created_at: now.toISOString(),
+    });
+  } catch (e) {
+    // Idempotent on workflow-body replay (mirror append-event.ts:69-72). Same row already exists → no-op.
+    // Gate rows carry no stepId, so the step-park branch below is moot on conflict; return early.
+    if (e instanceof ControlPlaneError && e.code === 'ROW_CONFLICT') return id;
+    throw e;
+  }
 
   // Park the originating step (bare path — G6):
   if (item.stepId) {
@@ -199,6 +244,13 @@ export async function getInbox(
 /**
  * resolveInbox — pure status flip + step unblock. NO DBOS signal (that is 0004).
  *
+ * G2 (0004): now returns the STORED decision `{ status, answer }` so the caller (CLI gate path)
+ * can signal WHAT IS RECORDED, never the raw flag passed to this call.
+ *   - `status` is the row's status BEFORE this call: 'pending' ⇒ just resolved; 'resolved' ⇒ already was.
+ *   - `answer` is the EFFECTIVE stored answer (first-resolver wins; retry returns stored, not its arg).
+ *
+ * Existing 0002 callers (non-gate resolve, run cancel CLI) ignore the return — backward-compatible.
+ *
  * RESUMABLE + idempotent (G9): COMPLETES on every call.
  *   - If inbox is pending: patch to resolved, then unblock the step.
  *   - If inbox is already resolved (retry / double-resolve): skip the inbox re-patch
@@ -221,7 +273,7 @@ export async function resolveInbox(
   answer: unknown,
   resolvedBy: string,
   opts?: { now?: Date },
-): Promise<void> {
+): Promise<ResolveInboxResult> {
   await da.assertReady();
 
   // (1) READ. getRow returns null for a missing inbox row.
@@ -253,13 +305,21 @@ export async function resolveInbox(
     ]);
   }
 
-  // The effective answer for the step unblock: stored wins on a re-call.
-  const effectiveAnswer = status === 'resolved' ? inbox.data.answer : answer;
+  // C2 (0004 review): the effective answer is ALWAYS the STORED (persisted) value — re-read
+  // from the row. On the already-resolved path the pre-read row carries the stored answer.
+  // On the first-resolve path, re-read after patching so we return what is durably recorded
+  // (guards against JSON-field round-trip canonicalization differences and concurrent resolvers).
+  // Both paths converge to: signal what is recorded, never the raw caller argument.
+  const resolvedInbox = status === 'pending' ? await da.getRow('inbox', itemId) : inbox;
+  const effectiveAnswer = resolvedInbox?.data.answer ?? answer;
 
   // (4) ALWAYS-RUN STEP COMPLETION (the resumable part).
   // Runs on every call once inbox is known-resolved.
   const stepId = typeof inbox.data.step_id === 'string' ? inbox.data.step_id : '';
-  if (!stepId) return; // alert-kind / step-less item: inbox flip is the whole resolve.
+  if (!stepId) {
+    // alert-kind / step-less item (including gate rows): inbox flip is the whole resolve.
+    return { status, answer: effectiveAnswer };
+  }
 
   // Re-read the originating step and idempotently complete the unblock.
   const step = await da.getRow('steps', stepId);
@@ -269,15 +329,16 @@ export async function resolveInbox(
       { op: 'replace', path: 'status', value: 'ready' },
       { op: 'replace', path: 'input', value: effectiveAnswer },
     ]);
-    return;
+    return { status, answer: effectiveAnswer };
   }
 
   // step already ready (done state) → clean NO-OP (no warn, no duplicate).
   if (step && step.data.status === 'ready') {
-    return;
+    return { status, answer: effectiveAnswer };
   }
 
   // step is null OR in an unexpected state (cancelled / re-driven / superseded) →
   // RESURRECTION GUARD: do NOT flip it. Leave the inbox resolved and console.warn.
   console.warn(`resolveInbox: step ${stepId} no longer awaiting_approval; skipping unblock`);
+  return { status, answer: effectiveAnswer };
 }

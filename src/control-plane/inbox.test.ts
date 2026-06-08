@@ -554,3 +554,109 @@ test('inbox.ts imports no @dbos-inc/* (edge 16)', () => {
     'inbox.ts must not import from @dbos-inc/* (DBOS coupling deferred to 0004)',
   );
 });
+
+// ─── 0004 G1: pushInbox opts.id (deterministic id, ROW_CONFLICT no-op) ───────
+
+// A8 (G1): pushInbox with opts.id uses id verbatim; ROW_CONFLICT is swallowed and same id returned.
+test('A8 (G1): pushInbox uses opts.id verbatim when provided (deterministic gate path)', async () => {
+  const { da, createCalls } = makeFakeDa();
+  const deterministicId = 'inbox_deadbeefdeadbeef';
+  const id = await pushInbox(da, { kind: 'approval', title: 'Gate', context: { topic: 'plan' } }, {
+    id: deterministicId,
+  });
+
+  assert.equal(id, deterministicId, 'returned id must match the supplied opts.id');
+  assert.equal(createCalls.length, 1, 'one createRow call expected');
+  assert.equal(createCalls[0]?.rowId, deterministicId, 'createRow rowId must be the deterministic id');
+});
+
+test('A8 (G1): pushInbox with opts.id swallows ROW_CONFLICT and returns same id (replay no-op)', async () => {
+  // Simulate a store where the row ALREADY exists (ROW_CONFLICT scenario).
+  const conflictStore = new Map<string, unknown>();
+  const conflictId = 'inbox_1234567890abcdef';
+
+  let createCallCount = 0;
+  const da = {
+    async assertReady() {},
+    async listRows() { return []; },
+    async getRow() { return null; },
+    async createRow(_table: string, rowId: string) {
+      createCallCount++;
+      if (conflictStore.has(rowId)) {
+        throw new ControlPlaneError('ROW_CONFLICT', `Rows already exist: ${rowId}`);
+      }
+      conflictStore.set(rowId, true);
+      return { rowId, data: {} };
+    },
+    async updateRow(_t: string, rowId: string) { return { rowId, data: {} }; },
+    async patchRow(_t: string, rowId: string) { return { rowId, data: {} }; },
+  };
+
+  // First call — succeeds, stores the row.
+  const id1 = await pushInbox(da as never, { kind: 'approval', title: 'Gate', context: {} }, { id: conflictId });
+  assert.equal(id1, conflictId, 'first call returns the id');
+  assert.equal(createCallCount, 1, 'first call creates the row');
+
+  // Second call (replay) — ROW_CONFLICT swallowed, same id returned, no throw.
+  let threw = false;
+  let id2: string | undefined;
+  try {
+    id2 = await pushInbox(da as never, { kind: 'approval', title: 'Gate', context: {} }, { id: conflictId });
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, 'ROW_CONFLICT must NOT propagate (replay no-op)');
+  assert.equal(id2, conflictId, 'second call returns the same id');
+  assert.equal(createCallCount, 2, 'createRow was attempted again (ROW_CONFLICT caught)');
+});
+
+// ─── 0004 G2: resolveInbox returns stored decision ───────────────────────────
+
+// A9 (G2 + C2): resolveInbox on pending row returns the STORED (re-read) answer on first resolve.
+// C2 fix: after patching, the function re-reads the inbox row and returns stored.data.answer —
+// not the raw caller argument — so concurrent/round-tripped values converge to what is recorded.
+test('A9 (G2+C2): resolveInbox on pending row returns stored (re-read) answer on first resolve', async () => {
+  const { da } = makePendingInboxWithStep();
+
+  const result = await resolveInbox(da, 'inbox-1', 'approve', 'alice', { now: FIXED_NOW });
+
+  // status is the BEFORE-this-call status: 'pending' (just resolved).
+  assert.equal(result.status, 'pending', 'status before call must be pending');
+  // C2: answer is the STORED (re-read from the patched row) value, not merely the caller arg.
+  // The fake patchRow applies the patch to the in-memory store, so the re-read returns 'approve'.
+  assert.equal(result.answer, 'approve', 'returned answer must equal the stored/re-read value (C2)');
+});
+
+test('A9 (G2): resolveInbox on already-resolved row returns stored answer (not caller arg)', async () => {
+  const inboxId = 'inbox-g2';
+  const stepId = 'step-g2';
+  const storedAnswer = { decision: 'approve' };
+
+  const { da } = makeFakeDa([
+    {
+      table: 'inbox',
+      rowId: inboxId,
+      data: {
+        id: inboxId, kind: 'approval', status: 'resolved',
+        title: 'T', run_id: 'run-g2', task_id: '', step_id: stepId,
+        project_id: '', context: null,
+        answer: storedAnswer,
+        resolved_by: 'alice', resolved_at: '2026-06-07T10:00:00.000Z',
+        created_at: '2026-06-07T09:00:00.000Z', options: [],
+      },
+    },
+    {
+      table: 'steps',
+      rowId: stepId,
+      data: { id: stepId, status: 'ready', input: 'yes' },
+    },
+  ]);
+
+  // Second call with a DIFFERENT answer (crash-after-resolve retry scenario).
+  const result = await resolveInbox(da, inboxId, { decision: 'reject' }, 'bob', { now: FIXED_NOW });
+
+  // status is 'resolved' (was already resolved before this call).
+  assert.equal(result.status, 'resolved', 'status must be resolved (was already)');
+  // answer is the STORED value, NOT the caller's argument.
+  assert.deepEqual(result.answer, storedAnswer, 'stored answer must win over caller arg (G2)');
+});

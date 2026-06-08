@@ -39,6 +39,13 @@ import { DBOS, WorkflowQueue, type WorkflowHandle } from '@dbos-inc/dbos-sdk';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+/**
+ * Far-future absolute deadline (year 2100 epoch ms). Fixed constant ⇒ deterministic on replay (G5).
+ * DBOS recv with no timeout/deadline defaults to 60 s; we pass this so human gates wait indefinitely.
+ * Never use Date.now()+X — that differs per replay and breaks DBOS replay-safety.
+ */
+export const GATE_DEADLINE_EPOCH_MS = 4102444800000; // 2100-01-01T00:00:00Z
+
 /** Return shape of the dev:ping workflow. */
 export type PingResult = {
   workflowID: string;
@@ -181,6 +188,30 @@ export class DbosService {
     ...args: A
   ): Promise<WorkflowHandle<R>> {
     return DBOS.startWorkflow(fn, { workflowID, queueName })(...args);
+  }
+
+  /**
+   * Signal a parked workflow's awaitDecision. Wraps DBOS.send; exactly-once via idempotencyKey.
+   *
+   * CANONICAL wrapper arg order: signal(workflowId, topic, payload, idempotencyKey).
+   * The wrapper REORDERS to DBOS's raw order INSIDE:
+   *   wrapper (workflowId, topic, payload) → DBOS.send(workflowId, payload, topic, idempotencyKey).
+   * Every call site MUST use the wrapper order (topic BEFORE payload); the raw DBOS swap lives
+   * ONLY here so it cannot be reintroduced at a call site (G9).
+   */
+  signal(workflowId: string, topic: string, payload: unknown, idempotencyKey?: string): Promise<void> {
+    // REORDER: wrapper (workflowId, topic, payload) → raw send(destinationID, message, topic, idempotencyKey).
+    return DBOS.send(workflowId, payload, topic, idempotencyKey);
+  }
+
+  /**
+   * Durable human wait — MUST be called from inside a registered workflow body.
+   * Default DBOS recv timeout is 60 s; pass a far-future deadline so the gate waits indefinitely.
+   * The deadline is a fixed constant (GATE_DEADLINE_EPOCH_MS), never Date.now()+X — that would
+   * differ per replay and break DBOS replay-safety (G5).
+   */
+  awaitDecision<T>(topic: string, opts?: { deadlineEpochMS?: number }): Promise<T | null> {
+    return DBOS.recv<T>(topic, { deadlineEpochMS: opts?.deadlineEpochMS ?? GATE_DEADLINE_EPOCH_MS });
   }
 
   // ── end generic engine verbs ────────────────────────────────────────────────

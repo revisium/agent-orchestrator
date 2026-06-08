@@ -23,12 +23,16 @@ import type { WorkflowHandle } from '../engine/types.js';
 import { DbosService } from '../engine/dbos.service.js';
 import { RolesService } from '../revisium/roles.service.js';
 import { RunService } from '../revisium/run.service.js';
+import { InboxService } from '../revisium/inbox.service.js';
 import { buildContext } from '../worker/build-context.js';
 import { createRunAgent } from '../worker/runner-dispatch.js';
 import { stubRunAgent } from '../worker/stub-runner.js';
 import type { RunAgent, AttemptResult } from '../worker/runner.js';
 import { fnv1a64Hex } from '../control-plane/steps.js';
 import type { AppendEventInput } from '../run/append-event.js';
+import { makeAwaitHuman } from './await-human.js';
+import type { Decision } from './await-human.js';
+import type { CancelRunResult } from '../run/cancel-run.js';
 
 /** Maximum developer/reviewer rework iterations before failing closed. */
 const MAX_REVIEW_ITERATIONS = 3;
@@ -39,12 +43,14 @@ const DEV_TASKS_QUEUE = 'dev-tasks';
 /** Concurrency limit for the dev-tasks queue. */
 const DEV_TASKS_CONCURRENCY = 2;
 
-/** Returned by developTask when the pipeline completes or is blocked. */
+/** Returned by developTask when the pipeline completes, is blocked, or is cancelled by a gate. */
 export type DevelopResult = {
   runId: string;
   blocked: boolean;
   iterations: number;
   verdict: string;
+  /** true when the plan-gate rejected the run and cancelRun was called (0004 human gate). */
+  cancelled: boolean;
 };
 
 /** Opts accepted by developTask — slot-1 of the PINNED arity (B11). */
@@ -102,6 +108,23 @@ export type RunStepDeps = {
 /** Dependencies for the developTask builder. */
 export type DevelopTaskDeps = {
   appendEvent: (input: AppendEventInput) => Promise<void>;
+  /**
+   * Human gate factory result — `await`ed directly in the workflow body at each gate.
+   * Wraps pushInbox (deterministic id, ROW_CONFLICT no-op) + DBOS.recv (via awaitDecision).
+   * Injected so tests can provide a fake without DBOS (C1 pattern).
+   */
+  awaitHuman: (
+    runId: string,
+    topic: 'plan' | 'merge',
+    title: string,
+    summary: unknown,
+  ) => Promise<Decision>;
+  /**
+   * Cancel a run (patch status + write run_cancelled event). Idempotent (G3).
+   * CR-B: accepts optional actor/source to distinguish CLI-cancel from gate-cancel.
+   * Injected so tests can assert without a real data-access.
+   */
+  cancelRun: (runId: string, opts?: { actor?: string; source?: string }) => Promise<CancelRunResult | null>;
 };
 
 /**
@@ -196,7 +219,7 @@ export function makeDevelopTask(
   ) => Promise<AttemptResult>,
   deps: DevelopTaskDeps,
 ) {
-  const { appendEvent } = deps;
+  const { appendEvent, awaitHuman, cancelRun } = deps;
 
   return async function developTaskImpl(
     runId: string,
@@ -212,6 +235,29 @@ export function makeDevelopTask(
       { phase: 'plan' },
       ro,
     );
+
+    // ── PLAN GATE (after architect, before developer) ──────────────────────────
+    // Workflow parks here in DBOS.recv until a human signals via `inbox resolve --approve|--reject`.
+    // pushInbox + appendEvent are idempotent in the workflow body (G1 deterministic id + ROW_CONFLICT).
+    const planDecision = await awaitHuman(runId, 'plan', 'Plan approval', architectResult.output);
+    if (planDecision.decision === 'reject') {
+      // gate_rejected: idempotent (deterministic event id + ROW_CONFLICT no-op via appendRunEvent).
+      await appendEvent({
+        runId,
+        taskId: '',
+        stepId: '',
+        stepKey: 'gate:plan',
+        type: 'gate_rejected',
+        payload: { topic: 'plan' },
+      });
+      // cancelRun is idempotent (G3: deterministic event id + ROW_CONFLICT no-op).
+      // CR-B: gate reject passes pipeline-appropriate metadata so the run_cancelled event
+      // is NOT mislabeled as a CLI cancel (actor:'cli', source:'revo run cancel').
+      await cancelRun(runId, { actor: 'pipeline', source: 'plan-gate-reject' });
+      // No developer/reviewer/integrator steps run on the reject path.
+      return { runId, blocked: false, iterations: 0, verdict: 'CANCELLED', cancelled: true };
+    }
+    // ── end PLAN GATE ──────────────────────────────────────────────────────────
 
     // developer step (first pass)
     let developerResult = await runStepFn(
@@ -266,11 +312,12 @@ export function makeDevelopTask(
         blocked: true,
         iterations: iteration,
         verdict: verdictOf(reviewResult),
+        cancelled: false,
       };
     }
 
     // integrator step
-    await runStepFn(
+    const integratorResult = await runStepFn(
       runId,
       'integrator',
       'integrator',
@@ -278,11 +325,32 @@ export function makeDevelopTask(
       ro,
     );
 
+    // ── MERGE GATE (after integrator) ──────────────────────────────────────────
+    // The integrator produces a PR url (placeholder in 0004; 0005 supplies the real url).
+    // Park here until the human signals. Approve ⇒ workflow completes (human merges externally).
+    // Reject ⇒ work is done, merge declined — run ends normally, NOT cancelled (E12/OQ-3).
+    const prUrl = (integratorResult.output as Record<string, unknown> | null)?.prUrl ?? 'stub://pr/placeholder';
+    const mergeDecision = await awaitHuman(runId, 'merge', 'Merge approval', { prUrl });
+    if (mergeDecision.decision === 'reject') {
+      // merge-gate reject ⇒ end normally (NOT cancelled — work is complete, merge declined).
+      await appendEvent({
+        runId,
+        taskId: '',
+        stepId: '',
+        stepKey: 'gate:merge',
+        type: 'gate_rejected',
+        payload: { topic: 'merge' },
+      });
+    }
+    // No auto-merge either way. Approve ⇒ workflow completes; the human merges externally.
+    // ── end MERGE GATE ─────────────────────────────────────────────────────────
+
     return {
       runId,
       blocked: false,
       iterations: iteration,
       verdict: verdictOf(reviewResult),
+      cancelled: false,
     };
   };
 }
@@ -310,6 +378,7 @@ export class PipelineService {
     private readonly dbos: DbosService,
     private readonly rolesService: RolesService,
     private readonly runService: RunService,
+    private readonly inboxService: InboxService,
   ) {
     // B9: throwing claudeCode dep — fails fast on non-`--stub` starts with a clear message.
     // 0005 replaces ONLY this dep with createClaudeCodeRunner.
@@ -322,7 +391,7 @@ export class PipelineService {
     this.runAgent = createRunAgent({ claudeCode: throwingClaudeCode, script: stubRunAgent });
 
     // Capture bound dep methods (S7740: no `this`-aliasing in closures).
-    const deps: RunStepDeps = {
+    const stepDeps: RunStepDeps = {
       loadRole: this.rolesService.loadRole.bind(this.rolesService),
       loadModelProfile: this.rolesService.loadModelProfile.bind(this.rolesService),
       loadPipelineContext: this.runService.loadPipelineContext.bind(this.runService),
@@ -334,13 +403,26 @@ export class PipelineService {
     // Register the step using the production builder (must happen BEFORE DBOS.launch()).
     this.runStepFn = this.dbos.registerStep(
       'PipelineService.runStep',
-      makeRunStep(deps),
+      makeRunStep(stepDeps),
     );
+
+    // Build the awaitHuman factory — DBOS-free, depends on injected service verbs.
+    const awaitHuman = makeAwaitHuman({
+      pushInbox: (item, id) => this.inboxService.pushInbox(item, { id }),
+      awaitDecision: (topic) => this.dbos.awaitDecision(topic),
+      appendEvent: stepDeps.appendEvent,
+    });
+
+    const workflowDeps: DevelopTaskDeps = {
+      appendEvent: stepDeps.appendEvent,
+      awaitHuman,
+      cancelRun: (runId: string, opts?: { actor?: string; source?: string }) => this.runService.cancelRun(runId, opts),
+    };
 
     // Register the workflow using the production builder with the DBOS-wrapped step.
     this.developTaskFn = this.dbos.registerWorkflow(
       'PipelineService.developTask',
-      makeDevelopTask(this.runStepFn, { appendEvent: deps.appendEvent }),
+      makeDevelopTask(this.runStepFn, workflowDeps),
     );
 
     // Register the WorkflowQueue (idempotent — Map-guarded in DbosService).

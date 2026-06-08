@@ -20,6 +20,7 @@ import { formatRunList, formatRunDetail, formatEventList } from '../../run/inspe
 import type { RunService } from '../../revisium/run.service.js';
 import { withRevisiumService } from './revisium-context.js';
 import { sanitizeWorkflowID } from './dev.js';
+import { pollWorkflowState } from './poll-workflow-state.js';
 
 type StartOptions = {
   stub: boolean;
@@ -60,6 +61,23 @@ async function resolvePipelineService(app: INestApplicationContext) {
 }
 
 /**
+ * runPollWorkflowState — thin wrapper that opens an InboxService context and
+ * delegates to the shared pollWorkflowState helper (poll-workflow-state.ts).
+ *
+ * Extracted to a local wrapper so runStart can call pollWorkflowState without
+ * holding an open Nest context for the full start flow.
+ */
+async function runPollWorkflowState(
+  runId: string,
+  dbosService: { getWorkflowStatus: (id: string) => Promise<{ status: string } | null> },
+): Promise<void> {
+  const { InboxService: InboxServiceClass } = await import('../../revisium/inbox.service.js');
+  await withRevisiumService(InboxServiceClass, (inboxSvc) =>
+    pollWorkflowState(runId, dbosService, inboxSvc),
+  );
+}
+
+/**
  * run start <id> [--stub]
  *
  * Host-requiring: enqueues the developTask DBOS workflow for the given runId.
@@ -69,6 +87,10 @@ async function resolvePipelineService(app: INestApplicationContext) {
  * start; a subsequent `run start --stub` on an already-started run returns the existing
  * handle and does NOT switch the runner (DBOS does not overwrite persisted args).
  * To switch, create a NEW run (new runId) and start that with --stub.
+ *
+ * 0004 §3.6: no longer blocks on waitForWorkflowResult (the workflow parks at recv).
+ * Instead, polls getWorkflowStatus (terminal) + listInbox (parked) and returns once settled.
+ * The workflow's DBOS checkpoint persists; shutting down the host while parked is safe.
  */
 async function runStart(
   runId: string,
@@ -123,17 +145,10 @@ async function runStart(
       }
     }
 
-    // C2: await the workflow to completion before the CLI closes the Nest app.
-    // This ensures `app.close()` / DBOS.shutdown() does not race the workflow.
-    // On a re-run (existing workflow): re-attaches to the existing handle and waits —
-    // does NOT double-enqueue (startDevelopTask is idempotent by workflowID=runId).
-    console.log('awaiting workflow completion…');
-    const result = await dbosService.waitForWorkflowResult<{ runId: string; blocked: boolean; iterations: number; verdict: string }>(handle.workflowID);
-    if (result) {
-      console.log(`done:     runId=${result.runId}  blocked=${result.blocked}  verdict=${result.verdict}  iterations=${result.iterations}`);
-    }
-    const finalStatus = await dbosService.getWorkflowStatus(handle.workflowID);
-    console.log(`status:   ${finalStatus?.status ?? 'UNKNOWN'}`);
+    // 0004 §3.6: poll for parked or terminal state. Does NOT block on getResult while parked.
+    // The workflow's DBOS checkpoint is durable; closing the host (DBOS.shutdown) while parked is safe.
+    console.log('awaiting settled state (parked or terminal)…');
+    await runPollWorkflowState(safeRunId, dbosService);
   } catch (error) {
     if (error instanceof ControlPlaneError) {
       console.error(`Error: ${formatCause(error)}`);

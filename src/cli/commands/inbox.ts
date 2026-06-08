@@ -3,18 +3,29 @@
  *
  * Routes through InboxService obtained from a per-invocation Revisium-only Nest context
  * (Option A, §3.0). NestJS is lazily imported so the host-free path never loads it.
- * inbox stays host-free — NOT added to HOST_COMMANDS, needsHost() unchanged.
  *
- * NOTE: `revo inbox resolve` in 0002 is a TABLE-ONLY resolve: status flip + step
- * continuation (no DBOS signal). The DBOS send/recv gate-wiring is slice 0004.
+ * 0004: `revo inbox resolve` is now gate-aware:
+ *  - Gate row (kind==='approval' && runId && context.topic∈{'plan','merge'}):
+ *    requires --approve|--reject → resolveInbox (table write) + signal (DBOS send)
+ *    + park/terminal poll (same as run start). HOST-REQUIRING.
+ *  - Non-gate row (question/alert/approval-without-topic): keep 0002 table-only
+ *    --answer resolve (no signal, host-free).
+ *
+ * G6: `registerInbox(program: Command, app?: INestApplicationContext)` — lazy pipeline/engine
+ * import. program.ts forwards the same `app?` already threaded into registerRun.
  *
  * Invariant #4: no @revisium/client import in this file (verbs only).
  */
 import { Command } from 'commander';
+import type { INestApplicationContext } from '@nestjs/common';
 import { ControlPlaneError } from '../../control-plane/index.js';
 import type { InboxService } from '../../revisium/inbox.service.js';
 import type { InboxItem } from '../../control-plane/inbox.js';
 import { withRevisiumService } from './revisium-context.js';
+import { pollWorkflowState } from './poll-workflow-state.js';
+
+/** Topics recognized as gate topics (must match AwaitHuman topics). */
+const GATE_TOPICS = new Set<string>(['plan', 'merge']);
 
 type ListOptions = {
   status?: string;
@@ -23,6 +34,8 @@ type ListOptions = {
 
 type ResolveOptions = {
   answer?: string;
+  approve: boolean;
+  reject: boolean;
   by?: string;
 };
 
@@ -63,6 +76,9 @@ function formatInboxItem(item: InboxItem): string {
   ];
   if (item.runId) lines.push(`run       ${item.runId}`);
   if (item.stepId) lines.push(`step      ${item.stepId}`);
+  if (item.context !== null && item.context !== undefined) {
+    lines.push(`context   ${JSON.stringify(item.context)}`);
+  }
   if (item.answer !== null && item.answer !== undefined) {
     lines.push(`answer    ${JSON.stringify(item.answer)}`);
   }
@@ -137,18 +153,180 @@ async function inboxShow(id: string): Promise<void> {
   }
 }
 
-async function inboxResolve(id: string, options: ResolveOptions): Promise<void> {
+/**
+ * Determine if a row is a gate row (G4).
+ * Gate rows: kind==='approval' AND have a runId AND context.topic is in GATE_TOPICS.
+ * Only gate rows require --approve|--reject and DBOS signal.
+ */
+function isGateRow(item: InboxItem): boolean {
+  if (item.kind !== 'approval') return false;
+  if (!item.runId) return false;
+  const ctx = item.context as Record<string, unknown> | null;
+  if (!ctx || typeof ctx !== 'object') return false;
+  const topic = ctx.topic;
+  return typeof topic === 'string' && GATE_TOPICS.has(topic);
+}
+
+/**
+ * InboxResolveDeps — injectable services for `resolveInboxCommand`.
+ * Extracted so unit tests can provide fakes without starting NestJS (C4).
+ */
+export type InboxResolveDeps = {
+  getInbox: (id: string) => Promise<InboxItem | null>;
+  resolveInbox: (itemId: string, answer: unknown, resolvedBy: string) => Promise<{ status: 'pending' | 'resolved'; answer: unknown }>;
+  signal: (workflowId: string, topic: string, payload: unknown, idempotencyKey: string) => Promise<void>;
+  pollRunState: (runId: string) => Promise<void>;
+};
+
+/**
+ * resolveGatePath — handle the gate-row branch of inbox resolve (G4).
+ * Extracted from resolveInboxCommand to reduce cognitive complexity (S3776).
+ *
+ * Returns true on success, false on validation error (sets process.exitCode=1).
+ */
+async function resolveGatePath(
+  id: string,
+  row: InboxItem,
+  options: ResolveOptions,
+  deps: InboxResolveDeps,
+): Promise<boolean> {
+  const resolvedBy = options.by ?? 'cli';
+
+  // Exactly one of --approve/--reject must be present.
+  if (options.approve && options.reject) {
+    console.error('Error: specify exactly one of --approve or --reject');
+    process.exitCode = 1;
+    return false;
+  }
+  if (!options.approve && !options.reject) {
+    console.error('Error: specify --approve or --reject for a gate row');
+    process.exitCode = 1;
+    return false;
+  }
+
+  const decision = options.approve
+    ? { decision: 'approve' as const, resolvedBy }
+    : { decision: 'reject' as const, resolvedBy };
+
+  // resolveInbox returns the STORED decision (G2) — signal WHAT IS RECORDED, not the raw flag.
+  const result = await deps.resolveInbox(id, decision, resolvedBy);
+
+  if (result.status === 'resolved') {
+    console.log(`note:     already resolved — signaling with stored answer`);
+  }
+
+  // Signal the parked workflow with the STORED answer (G2, G9 canonical order: topic before payload).
+  // idempotencyKey = inbox id → DBOS.send exactly-once (re-resolve collapses by key).
+  const ctx = row.context as Record<string, unknown>;
+  const topic = typeof ctx.topic === 'string' ? ctx.topic : '';
+  await deps.signal(row.runId, topic, result.answer, id);
+
+  console.log(`resolved  ${id}`);
+  console.log(`decision: ${String((result.answer as Record<string, unknown> | null)?.decision ?? result.answer)}`);
+  console.log(`by:       ${resolvedBy}`);
+  console.log('awaiting next gate or completion…');
+
+  // Poll for next-gate/terminal (same logic as run start, §3.6).
+  await deps.pollRunState(row.runId);
+  return true;
+}
+
+/**
+ * resolveNonGatePath — handle the non-gate-row branch of inbox resolve.
+ * Preserved 0002 behavior: table-only resolve, no signal, no host required.
+ * Extracted from resolveInboxCommand to reduce cognitive complexity (S3776).
+ *
+ * Returns true on success, false on validation error (sets process.exitCode=1).
+ */
+async function resolveNonGatePath(
+  id: string,
+  options: ResolveOptions,
+  deps: InboxResolveDeps,
+): Promise<boolean> {
+  if (options.approve || options.reject) {
+    console.error('Error: --approve/--reject is only valid on a gate row (kind=approval with plan/merge topic)');
+    console.error('       for non-gate rows use --answer');
+    process.exitCode = 1;
+    return false;
+  }
+
+  const resolvedBy = options.by ?? 'cli';
+  // Normalize: --answer omitted → null (do NOT pass undefined; patch serializer drops it).
+  const answer: unknown = options.answer !== undefined ? options.answer : null;
+
+  await deps.resolveInbox(id, answer, resolvedBy);
+
+  console.log(`resolved inbox item ${id}`);
+  console.log(`answer: ${JSON.stringify(answer)}`);
+  console.log(`resolved by: ${resolvedBy}`);
+  return true;
+}
+
+/**
+ * resolveInboxCommand — testable core of `inbox resolve` (C4).
+ * All I/O goes through `deps`; callers provide fakes in tests.
+ * Returns `true` on success, `false` on validation / not-found error (sets process.exitCode=1).
+ */
+export async function resolveInboxCommand(
+  id: string,
+  options: ResolveOptions,
+  deps: InboxResolveDeps,
+): Promise<boolean> {
+  // (1) Read the row first — needed for both gate and non-gate paths.
+  const row = await deps.getInbox(id);
+  if (!row) {
+    console.error(`inbox item not found: ${id}`);
+    process.exitCode = 1;
+    return false;
+  }
+
+  if (isGateRow(row)) {
+    // ── GATE PATH (G4) ────────────────────────────────────────────────────
+    // Requires --approve|--reject. Signals the parked DBOS workflow. HOST-REQUIRING.
+    return resolveGatePath(id, row, options, deps);
+  }
+
+  // ── NON-GATE PATH (0002 preserved) ────────────────────────────────────
+  // question/alert/approval-without-topic: table-only resolve, no signal, no host.
+  return resolveNonGatePath(id, options, deps);
+}
+
+async function inboxResolve(
+  id: string,
+  options: ResolveOptions,
+  app: INestApplicationContext | undefined,
+): Promise<void> {
+  // Guard: --approve/--reject requires the host context (needsHost enforces this, but be defensive).
+  if ((options.approve || options.reject) && !app) {
+    console.error('inbox resolve --approve|--reject requires the host context');
+    process.exitCode = 1;
+    return;
+  }
+
+  // Lazily obtain DbosService only if we have a host context (gate path).
+  // This avoids importing the engine module on the non-gate path.
+  let dbosService: { signal: (w: string, t: string, p: unknown, k: string) => Promise<void>; getWorkflowStatus: (id: string) => Promise<{ status: string } | null> } | null = null;
+  if (app) {
+    const { DbosService: DbosServiceClass } = await import('../../engine/dbos.service.js');
+    dbosService = app.get(DbosServiceClass);
+  }
+
+  const deps: InboxResolveDeps = {
+    getInbox: (itemId) => withInboxService((svc) => svc.getInbox(itemId)),
+    resolveInbox: (itemId, answer, resolvedBy) =>
+      withInboxService((svc) => svc.resolveInbox(itemId, answer, resolvedBy)),
+    signal: (workflowId, topic, payload, idempotencyKey) => {
+      if (!dbosService) throw new Error('signal requires host context');
+      return dbosService.signal(workflowId, topic, payload, idempotencyKey);
+    },
+    pollRunState: (runId) =>
+      withInboxService((svc) =>
+        pollWorkflowState(runId, dbosService ?? { getWorkflowStatus: async () => null }, svc),
+      ),
+  };
+
   try {
-    // Normalize: --answer omitted → null (do NOT pass undefined; patch serializer drops it).
-    const answer: unknown = options.answer !== undefined ? options.answer : null;
-    const resolvedBy = options.by ?? 'cli';
-
-    await withInboxService((svc) => svc.resolveInbox(id, answer, resolvedBy));
-
-    console.log(`resolved inbox item ${id}`);
-    console.log(`answer: ${JSON.stringify(answer)}`);
-    console.log(`resolved by: ${resolvedBy}`);
-    console.log('(table-only resolve in 0002; DBOS signal deferred to slice 0004)');
+    await resolveInboxCommand(id, options, deps);
   } catch (error) {
     if (error instanceof ControlPlaneError) {
       console.error(`Error: ${formatCause(error)}`);
@@ -162,7 +340,7 @@ async function inboxResolve(id: string, options: ResolveOptions): Promise<void> 
   }
 }
 
-export function registerInbox(program: Command): void {
+export function registerInbox(program: Command, app?: INestApplicationContext): void {
   const inbox = program.command('inbox').description('Manage the human inbox');
 
   inbox
@@ -180,9 +358,11 @@ export function registerInbox(program: Command): void {
 
   inbox
     .command('resolve')
-    .description('Resolve an inbox item (table-only in 0002; DBOS signal is slice 0004)')
+    .description('Resolve an inbox item (gate rows require --approve|--reject; non-gate rows use --answer)')
     .argument('<id>', 'Inbox item ID')
-    .option('--answer <a>', 'Answer / decision (omit for null)')
+    .option('--answer <a>', 'Answer / decision for non-gate rows (omit for null)')
+    .option('--approve', 'Approve a gate row (plan/merge)', false)
+    .option('--reject', 'Reject a gate row (plan/merge)', false)
     .option('--by <who>', 'Resolver identifier', 'cli')
-    .action(inboxResolve);
+    .action((id: string, options: ResolveOptions) => inboxResolve(id, options, app));
 }
