@@ -150,6 +150,26 @@ test('known run emits a run_cancelled event with deterministic id (G3)', async (
   assert.deepEqual(event.data.payload, { source: 'revo run cancel', previous_status: 'running' });
 });
 
+// CR-B: caller-aware actor/source — pipeline gate reject uses actor:'pipeline',source:'plan-gate-reject'.
+// CLI `run cancel` keeps the default actor:'cli',source:'revo run cancel' (unchanged).
+test('CR-B: gate cancel uses pipeline actor/source; CLI cancel uses cli defaults', async () => {
+  // CLI path (no opts): defaults apply.
+  const { da: cliDa, creates: cliCreates } = makeFake([RUN('running')]);
+  await cancelRun(cliDa, 'run-a', { now: new Date('2026-06-08T00:00:00.000Z') });
+  const cliEvent = cliCreates.find((c) => c.table === 'events');
+  assert.ok(cliEvent, 'CLI cancel must write an event');
+  assert.equal(cliEvent.data.actor, 'cli', 'CLI cancel: actor must be cli');
+  assert.equal((cliEvent.data.payload as Record<string, unknown>).source, 'revo run cancel', 'CLI cancel: source must be revo run cancel');
+
+  // Gate path: pipeline metadata.
+  const { da: gateDa, creates: gateCreates } = makeFake([RUN('running')]);
+  await cancelRun(gateDa, 'run-a', { now: new Date('2026-06-08T00:00:00.000Z'), actor: 'pipeline', source: 'plan-gate-reject' });
+  const gateEvent = gateCreates.find((c) => c.table === 'events');
+  assert.ok(gateEvent, 'gate cancel must write an event');
+  assert.equal(gateEvent.data.actor, 'pipeline', 'gate cancel: actor must be pipeline');
+  assert.equal((gateEvent.data.payload as Record<string, unknown>).source, 'plan-gate-reject', 'gate cancel: source must be plan-gate-reject');
+});
+
 // A10b (G3): double-cancel ROW_CONFLICT no-op — second call does not throw; exactly one event row.
 test('double-cancel: second cancelRun swallows ROW_CONFLICT and returns result (G3 idempotent)', async () => {
   // First call: creates the event row.
@@ -168,6 +188,57 @@ test('double-cancel: second cancelRun swallows ROW_CONFLICT and returns result (
   // Only one event was actually created (second was swallowed).
   const events2 = creates1.filter((c) => c.table === 'events');
   assert.equal(events2.length, 1, 'double-cancel: still exactly one event row (ROW_CONFLICT swallowed)');
+});
+
+// CR-A replay-window test: simulates the scenario where the run_cancelled event was
+// written (with previous_status:'running') but the task_runs status patch has NOT yet
+// been applied (crash in the replay window between event write and status patch).
+// On re-run, cancelRun must:
+//   - Read prev = 'running' (status still unpatched on the run row).
+//   - Attempt the event write → ROW_CONFLICT (event already exists with previous_status:'running').
+//   - In the catch: apply the status patch (completing the interrupted first run).
+//   - Return a successful result.
+// The event's previous_status must NEVER be 'cancelled' — it was captured as 'running'
+// on the first run and the ROW_CONFLICT ensures the first write is immutable.
+test('CR-A: replay window (event written, status not yet patched) — event previous_status stays true prior', async () => {
+  // Scenario: run status is STILL 'running' (patch never happened), but the event was
+  // already written on the first run with previous_status:'running'.
+  // Simulate by using a fake with throwConflictOnEvent=true and pre-seeding the event id.
+  const runRows: ControlPlaneRow[] = [
+    { rowId: 'run-rw', data: { id: 'run-rw', status: 'running', title: 'RW', priority: 0, repos: ['r'] } },
+  ];
+  const expectedEventId = `event_${fnv1a64Hex('run-rw|run_cancelled')}`;
+
+  // Build the fake and pre-seed the event id (simulating the first run's event write).
+  const replayFake = makeFake(runRows, { throwConflictOnEvent: true });
+  // Pre-seed: createRow the event with the correct previous_status:'running' (first run's record).
+  await replayFake.da.createRow('events', expectedEventId, {
+    id: expectedEventId, run_id: 'run-rw', type: 'run_cancelled',
+    payload: { source: 'revo run cancel', previous_status: 'running' },
+    actor: 'cli', created_at: '2026-06-08T00:00:00.000Z',
+  });
+
+  // Now simulate the replay: run status is still 'running', event already exists (ROW_CONFLICT will fire).
+  const result = await cancelRun(replayFake.da, 'run-rw', { now: new Date('2026-06-08T00:00:00.000Z') });
+
+  // The replay must succeed and complete the status patch.
+  assert.ok(result !== null, 'replay must not throw');
+  assert.equal(result.status, 'cancelled');
+  // previousStatus reflects what was read at replay time (still 'running' — not yet patched).
+  assert.equal(result.previousStatus, 'running', 'previousStatus must be true prior status, not cancelled');
+
+  // The status patch must have been applied in the ROW_CONFLICT catch (completing the interrupted run).
+  const runPatches = replayFake.patches.filter((p) => p.table === 'task_runs');
+  assert.equal(runPatches.length, 1, 'replay must apply the status patch exactly once');
+
+  // The event must NOT have been re-written — the pre-seed (first run's record) is the only one.
+  // replayFake.creates includes the pre-seed + any replay attempt; both have previous_status:'running'.
+  const eventCreates = replayFake.creates.filter((c) => c.table === 'events');
+  // All event create attempts (including the pre-seed) must carry previous_status:'running' — never 'cancelled'.
+  for (const ev of eventCreates) {
+    const evPayload = ev.data.payload as { previous_status: string } | undefined;
+    assert.equal(evPayload?.previous_status, 'running', "event previous_status must be 'running', not 'cancelled'");
+  }
 });
 
 // C1 (0004 review): double-cancel patches task_runs status AT MOST ONCE (2nd call is no-op on run row).

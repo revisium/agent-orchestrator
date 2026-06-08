@@ -46,7 +46,7 @@ export class RunService {
     return listRunEvents(this.da, id, filter);
   }
 
-  cancelRun(id: string, opts?: { now?: Date; idSuffix?: string }): Promise<CancelRunResult | null> {
+  cancelRun(id: string, opts?: { now?: Date; idSuffix?: string; actor?: string; source?: string }): Promise<CancelRunResult | null> {
     return cancelRun(this.da, id, opts);
   }
 

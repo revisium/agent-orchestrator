@@ -121,9 +121,10 @@ export type DevelopTaskDeps = {
   ) => Promise<Decision>;
   /**
    * Cancel a run (patch status + write run_cancelled event). Idempotent (G3).
+   * CR-B: accepts optional actor/source to distinguish CLI-cancel from gate-cancel.
    * Injected so tests can assert without a real data-access.
    */
-  cancelRun: (runId: string) => Promise<CancelRunResult | null>;
+  cancelRun: (runId: string, opts?: { actor?: string; source?: string }) => Promise<CancelRunResult | null>;
 };
 
 /**
@@ -250,7 +251,9 @@ export function makeDevelopTask(
         payload: { topic: 'plan' },
       });
       // cancelRun is idempotent (G3: deterministic event id + ROW_CONFLICT no-op).
-      await cancelRun(runId);
+      // CR-B: gate reject passes pipeline-appropriate metadata so the run_cancelled event
+      // is NOT mislabeled as a CLI cancel (actor:'cli', source:'revo run cancel').
+      await cancelRun(runId, { actor: 'pipeline', source: 'plan-gate-reject' });
       // No developer/reviewer/integrator steps run on the reject path.
       return { runId, blocked: false, iterations: 0, verdict: 'CANCELLED', cancelled: true };
     }
@@ -413,7 +416,7 @@ export class PipelineService {
     const workflowDeps: DevelopTaskDeps = {
       appendEvent: stepDeps.appendEvent,
       awaitHuman,
-      cancelRun: (runId: string) => this.runService.cancelRun(runId),
+      cancelRun: (runId: string, opts?: { actor?: string; source?: string }) => this.runService.cancelRun(runId, opts),
     };
 
     // Register the workflow using the production builder with the DBOS-wrapped step.

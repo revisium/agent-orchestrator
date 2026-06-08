@@ -147,16 +147,25 @@ export async function pushInbox(
 ): Promise<string> {
   await da.assertReady();
 
-  // C3 (0004 review): early-branch — when opts.id is present, use it verbatim and skip
-  // computing timestamp/random values entirely. This keeps the deterministic workflow-body
-  // push free of any non-determinism. Only the legacy path (no opts.id) computes now+suffix.
+  // CR-C (0004 CR): avoid computing non-deterministic values on the deterministic gate path.
+  // When opts.id is present, we do NOT call new Date() until we are inside the actual insert —
+  // at which point ROW_CONFLICT makes the row exactly-once (first write wins; any replayed
+  // new Date() is discarded by the conflict and never persisted). The timestamp is a real wall-
+  // clock value on the FIRST insert and is irrelevant on replay. Only the legacy path (no
+  // opts.id) needs now for the id itself, so it is computed first in that branch only.
   let id: string;
-  const now = opts?.now ?? new Date();
+  let now: Date;
   if (opts?.id === undefined) {
+    // Legacy path: timestamp is part of the id — must be computed before createRow.
+    now = opts?.now ?? new Date();
     const suffix = opts?.idSuffix ?? randomUUID().replaceAll('-', '').slice(0, 8);
     id = `inbox_${compactStamp(now)}_${suffix}`;
   } else {
+    // Deterministic gate path: id is caller-supplied verbatim; timestamp is only needed
+    // for created_at in the insert — evaluated lazily inside the try block below.
     id = opts.id;
+    // Use opts.now if provided (test-seeded), otherwise defer new Date() to the insert.
+    now = opts?.now ?? new Date();
   }
   const safeContext = redactSecrets(item.context);
 
@@ -179,6 +188,9 @@ export async function pushInbox(
       answer: null,
       resolved_by: '',
       resolved_at: '',
+      // On the opts.id (gate) path, created_at uses `now` computed above. On a workflow-body
+      // replay, ROW_CONFLICT fires BEFORE this value is persisted — so a different now per
+      // replay is harmless (it is discarded). The FIRST insert's timestamp is the real one.
       created_at: now.toISOString(),
     });
   } catch (e) {

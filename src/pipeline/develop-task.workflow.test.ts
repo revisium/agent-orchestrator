@@ -137,6 +137,7 @@ type Harness = {
   appendEventArgs: Array<{ stepKey: string; type: string }>;
   appendEventInputs: AppendEventInput[];
   cancelRunArgs: string[];
+  cancelRunOpts: Array<{ actor?: string; source?: string } | undefined>;
 };
 
 /**
@@ -166,6 +167,7 @@ function buildDeps(opts: {
     appendEventArgs: [],
     appendEventInputs: [],
     cancelRunArgs: [],
+    cancelRunOpts: [],
   };
 
   const defaultRoles = new Map<string, Role>([
@@ -244,9 +246,10 @@ function buildDeps(opts: {
     return awaitHumanResults[topic] ?? { decision: 'approve' };
   };
 
-  // cancelRun fake — records the runId.
-  const cancelRun = async (runId: string): Promise<CancelRunResult | null> => {
+  // cancelRun fake — records the runId and opts (CR-B: actor/source).
+  const cancelRun = async (runId: string, cancelOpts?: { actor?: string; source?: string }): Promise<CancelRunResult | null> => {
     harness.cancelRunArgs.push(runId);
+    harness.cancelRunOpts.push(cancelOpts);
     return { runId, previousStatus: 'running', status: 'cancelled' };
   };
 
@@ -670,9 +673,11 @@ test('A5: plan-reject → cancelRun called, gate_rejected event, cancelled:true,
 
   assert.equal(result.cancelled, true, 'cancelled must be true on plan reject');
   assert.equal(result.verdict, 'CANCELLED');
-  // cancelRun was called once with the runId
+  // cancelRun was called once with the runId and pipeline-appropriate metadata (CR-B).
   assert.equal(harness.cancelRunArgs.length, 1, 'cancelRun must be called on plan reject');
   assert.equal(harness.cancelRunArgs[0], runId);
+  assert.deepEqual(harness.cancelRunOpts[0], { actor: 'pipeline', source: 'plan-gate-reject' },
+    'CR-B: gate reject must pass actor:pipeline, source:plan-gate-reject (not CLI defaults)');
   // gate_rejected event written for plan
   const rejected = harness.appendEventArgs.filter((e) => e.type === 'gate_rejected');
   assert.equal(rejected.length, 1, 'one gate_rejected event expected (plan)');
