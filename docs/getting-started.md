@@ -57,7 +57,7 @@ This single command:
 3. Enqueues the durable `developTask` workflow (architect → developer → reviewer → integrator).
 4. Attaches a live viewer that polls until the run parks at the **plan gate**, then prints:
 
-```
+```text
 parked:   run <runId> is waiting at the 'plan' gate
           resolve with: revo inbox resolve <gateId> --approve|--reject
 ```

@@ -35,6 +35,10 @@ const DEFAULT_INTERVAL_MS = 500;
 /** Cap for wait:true mode: 2400 × 500ms ≈ 20 min. */
 const WAIT_MAX_ATTEMPTS = 2400;
 
+/** Shared detach/re-attach message printed by both the SIGINT path and the gate path. */
+const DETACH_MSG = (runId: string) =>
+  `detached — the durable state is preserved; resume with: revo run start ${runId} --wait`;
+
 /**
  * DbosStatusProvider — minimal interface for querying DBOS workflow status.
  * Accepted by pollWorkflowState so callers need not import DbosService directly.
@@ -57,15 +61,50 @@ export type PollOpts = {
 };
 
 /**
- * abortableSleep — sleep for intervalMs, but resolve early if abortFn returns true.
- * Uses a single timer; checked by polling abortFn isn't needed — the SIGINT handler
- * that flips the flag also resolves the promise via a shared resolve ref.
+ * abortableSleep — sleep for intervalMs, but resolve early if the SIGINT handler
+ * calls earlyResolveRef.resolve(). Uses a single timer; no polling loop needed.
  */
 function abortableSleep(intervalMs: number, earlyResolveRef: { resolve?: () => void }): Promise<void> {
   return new Promise<void>((resolve) => {
     earlyResolveRef.resolve = resolve;
     setTimeout(resolve, intervalMs);
   });
+}
+
+/**
+ * checkTerminalStatus — check if the workflow has reached a terminal DBOS status.
+ * Prints the status line and returns true if terminal so the caller can stop.
+ */
+async function checkTerminalStatus(runId: string, dbosService: DbosStatusProvider): Promise<boolean> {
+  const wfStatus = await dbosService.getWorkflowStatus(runId);
+  if (wfStatus && TERMINAL_STATUSES.has(wfStatus.status)) {
+    console.log(`status:   ${wfStatus.status}`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * checkParkedGate — check if the workflow is parked at a gate (pending inbox row).
+ * Prints the parked line, resolve hint, and (in wait:true mode) the re-attach hint.
+ * Returns true if parked so the caller can stop.
+ */
+async function checkParkedGate(runId: string, inboxSvc: InboxService, wait: boolean): Promise<boolean> {
+  const pending = await inboxSvc.listInbox({ runId, status: 'pending' });
+  if (pending.length === 0) {
+    return false;
+  }
+  const gateRow = pending[0];
+  if (gateRow) {
+    const ctx = gateRow.context as Record<string, unknown> | null;
+    const topic = typeof ctx?.topic === 'string' ? ctx.topic : '?';
+    console.log(`parked:   run ${runId} is waiting at the '${topic}' gate`);
+    console.log(`          resolve with: revo inbox resolve ${gateRow.id} --approve|--reject`);
+    if (wait) {
+      console.log(`          ${DETACH_MSG(runId)}`);
+    }
+  }
+  return true;
 }
 
 /**
@@ -103,42 +142,15 @@ export async function pollWorkflowState(
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (aborted) {
-        console.log(
-          `detached — the durable state is preserved; resume with: revo run start ${runId} --wait`,
-        );
+        console.log(DETACH_MSG(runId));
         return;
       }
 
-      // Check for terminal DBOS status first.
-      const wfStatus = await dbosService.getWorkflowStatus(runId);
-      if (wfStatus && TERMINAL_STATUSES.has(wfStatus.status)) {
-        console.log(`status:   ${wfStatus.status}`);
+      if (await checkTerminalStatus(runId, dbosService)) {
         return;
       }
 
-      // Check for a parked gate (pending inbox approval row for this run).
-      const pending = await inboxSvc.listInbox({ runId, status: 'pending' });
-      if (pending.length > 0) {
-        const gateRow = pending[0];
-        if (gateRow) {
-          const ctx = gateRow.context as Record<string, unknown> | null;
-          const topic = typeof ctx?.topic === 'string' ? ctx.topic : '?';
-          console.log(`parked:   run ${runId} is waiting at the '${topic}' gate`);
-          console.log(`          resolve with: revo inbox resolve ${gateRow.id} --approve|--reject`);
-          if (wait) {
-            // In wait:true mode: print re-attach hint then return (operator must act at the gate).
-            console.log(
-              `          this viewer detached — the run's durable state is preserved; resume with: revo run start ${runId} --wait`,
-            );
-          }
-        }
-        return;
-      }
-
-      if (aborted) {
-        console.log(
-          `detached — the durable state is preserved; resume with: revo run start ${runId} --wait`,
-        );
+      if (await checkParkedGate(runId, inboxSvc, wait)) {
         return;
       }
 
