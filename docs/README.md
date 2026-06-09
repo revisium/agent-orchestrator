@@ -9,7 +9,7 @@ Documentation for the local AI-agent orchestrator built on Revisium. Repo-local 
 2. [adr/0001-execution-engine-and-host.md](./adr/0001-execution-engine-and-host.md) — why DBOS + NestJS (the pivot).
 3. [roadmap.md](./roadmap.md) — doc status + the MVP build slices.
 4. [control-plane-schema.md](./control-plane-schema.md) — the tables; versioned vs runtime (post-pivot).
-5. [getting-started.md](./getting-started.md) — run the local Revisium daemon + bootstrap (pre-pivot; see banner).
+5. [getting-started.md](./getting-started.md) — run the local Revisium daemon + bootstrap, create + drive a run end-to-end.
 
 ## Reference docs (durable — "what / why")
 

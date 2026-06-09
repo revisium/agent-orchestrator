@@ -18,11 +18,13 @@ import assert from 'node:assert/strict';
 import { resolveInboxCommand } from './inbox.js';
 import type { InboxResolveDeps } from './inbox.js';
 import type { InboxItem } from '../../control-plane/inbox.js';
+import type { PollOpts } from './poll-workflow-state.js';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 type SignalCall = { workflowId: string; topic: string; payload: unknown; idempotencyKey: string };
 type ResolveCall = { itemId: string; answer: unknown; resolvedBy: string };
+type PollCall = { runId: string; pollOpts?: PollOpts };
 
 function makeGateRow(overrides: Partial<InboxItem> = {}): InboxItem {
   return {
@@ -67,10 +69,10 @@ function makeDeps(
   row: InboxItem | null,
   storedAnswer: unknown = { decision: 'approve' },
   alreadyResolved = false,
-): { deps: InboxResolveDeps; signalCalls: SignalCall[]; resolveCalls: ResolveCall[]; pollCalls: string[] } {
+): { deps: InboxResolveDeps; signalCalls: SignalCall[]; resolveCalls: ResolveCall[]; pollCalls: PollCall[] } {
   const signalCalls: SignalCall[] = [];
   const resolveCalls: ResolveCall[] = [];
-  const pollCalls: string[] = [];
+  const pollCalls: PollCall[] = [];
 
   const deps: InboxResolveDeps = {
     getInbox: async () => row,
@@ -81,8 +83,8 @@ function makeDeps(
     signal: async (workflowId, topic, payload, idempotencyKey) => {
       signalCalls.push({ workflowId, topic, payload, idempotencyKey });
     },
-    pollRunState: async (runId) => {
-      pollCalls.push(runId);
+    pollRunState: async (runId, pollOpts) => {
+      pollCalls.push({ runId, pollOpts });
     },
   };
 
@@ -169,7 +171,39 @@ test('C4(a): gate row polls run state after signal', async () => {
   try {
     await resolveInboxCommand('inbox_gate_001', { approve: true, reject: false }, deps);
     assert.equal(pollCalls.length, 1, 'pollRunState must be called once after signal');
-    assert.equal(pollCalls[0], 'run-plan-1', 'pollRunState called with the runId');
+    assert.equal(pollCalls[0]?.runId, 'run-plan-1', 'pollRunState called with the runId');
+  } finally {
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+// ─── 0006: --wait threading on inbox resolve ─────────────────────────────────
+
+test('0006: inbox resolve --approve --wait → pollRunState receives {wait:true}', async () => {
+  const gateRow = makeGateRow();
+  const { deps, pollCalls } = makeDeps(gateRow);
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+
+  try {
+    await resolveInboxCommand('inbox_gate_001', { approve: true, reject: false, wait: true }, deps);
+    assert.equal(pollCalls.length, 1, 'pollRunState must be called once');
+    assert.equal(pollCalls[0]?.pollOpts?.wait, true, '--wait must set wait:true in PollOpts');
+  } finally {
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+test('0006: inbox resolve --approve (no --wait) → pollRunState receives {wait:false}', async () => {
+  const gateRow = makeGateRow();
+  const { deps, pollCalls } = makeDeps(gateRow);
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+
+  try {
+    await resolveInboxCommand('inbox_gate_001', { approve: true, reject: false, wait: false }, deps);
+    assert.equal(pollCalls.length, 1, 'pollRunState must be called once');
+    assert.equal(pollCalls[0]?.pollOpts?.wait, false, 'no --wait must set wait:false in PollOpts');
   } finally {
     process.exitCode = origExitCode as number | undefined;
   }

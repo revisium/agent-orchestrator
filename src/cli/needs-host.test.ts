@@ -152,3 +152,27 @@ test('needsHost: inbox resolve --approve --help → false (help flag wins)', () 
 test('needsHost: inbox resolve --reject -h → false (help flag wins)', () => {
   assert.equal(needsHost(argv('inbox', 'resolve', 'inbox-1', '--reject', '-h')), false);
 });
+
+// ── 0006: run create --start routing ────────────────────────────────────────
+
+test('needsHost: run create --start → true (enqueues workflow, host-requiring)', () => {
+  assert.equal(needsHost(argv('run', 'create', '--title', 'X', '--repo', '.', '--start')), true);
+});
+
+test('needsHost: run create --start --live → true (host-requiring with live flag)', () => {
+  assert.equal(
+    needsHost(argv('run', 'create', '--title', 'X', '--repo', '.', '--start', '--live')),
+    true,
+  );
+});
+
+test('needsHost: run create (no --start) → false (host-free, draft-only)', () => {
+  assert.equal(needsHost(argv('run', 'create', '--title', 'X', '--repo', '.')), false);
+});
+
+test('needsHost: run create --start --help → false (help wins over --start)', () => {
+  assert.equal(
+    needsHost(argv('run', 'create', '--title', 'X', '--repo', '.', '--start', '--help')),
+    false,
+  );
+});
