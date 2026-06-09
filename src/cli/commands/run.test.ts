@@ -1,17 +1,31 @@
 /**
- * run.test.ts — unit tests for the run start command (guard + option-mapping).
+ * run.test.ts — unit tests for `run start` and `run create` (guard + option-mapping).
  *
- * Uses the exported runStartCore (C1 pattern) with fake RunStartDeps so no NestJS
- * context or real database is needed. Exercises the EXACT production code path for:
+ * Uses runStartCore (C1 pattern) and createRunCore with fake deps so no NestJS context
+ * or real database is needed. Covers the EXACT production code paths for:
+ *
+ * runStartCore:
  *   - default (no flags)  → runnerMode='script'
  *   - --stub              → runnerMode='script'
  *   - --live              → runnerMode='live' AND LIVE_COST_WARNING emitted
- *   - --stub --live       → process.exitCode===1, startDevelopTask NOT called
+ *   - --stub --live       → exitCode=1, startDevelopTask NOT called
+ *   - run not found       → exitCode=1, startDevelopTask NOT called
+ *   - --live warning ordering
+ *   - --wait / no --wait  → wait threaded to pollState
+ *
+ * createRunCore:
+ *   - --start without app → exitCode=1, createRunFn NOT called, runStart NOT called
+ *   - --start --stub --live → exitCode=1, createRunFn NOT called, runStart NOT called
+ *   - --start + app (valid) → run created once, runStart called exactly once with {stub,live,wait}
+ *   - --start --wait      → wait:true threaded into runStart
+ *   - non-start create    → run created, runStart NOT called
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runStartCore, type RunStartDeps } from './run.js';
+import { runStartCore, type RunStartDeps, createRunCore, type CreateRunDeps } from './run.js';
 import { LIVE_COST_WARNING } from '../live-guard.js';
+import type { PollOpts } from './poll-workflow-state.js';
+import type { INestApplicationContext } from '@nestjs/common';
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -21,7 +35,7 @@ type StartDepsOverride = Partial<RunStartDeps>;
 
 type CallRecord = {
   startDevelopTaskCalls: Array<{ runId: string; opts: { runnerMode: 'script' | 'live' } }>;
-  pollStateCalls: string[];
+  pollStateCalls: Array<{ runId: string; pollOpts?: PollOpts }>;
 };
 
 /**
@@ -49,8 +63,8 @@ function buildFakeDeps(opts: {
       record.startDevelopTaskCalls.push({ runId, opts: startOpts });
       return { workflowID: runId };
     },
-    pollState: async (runId) => {
-      record.pollStateCalls.push(runId);
+    pollState: async (runId, pollOpts) => {
+      record.pollStateCalls.push({ runId, pollOpts });
     },
     ...opts.overrides,
   };
@@ -86,6 +100,9 @@ test('run start default (no flags) → runnerMode=script forwarded to startDevel
     assert.equal(record.startDevelopTaskCalls.length, 1, 'startDevelopTask must be called once');
     assert.equal(record.startDevelopTaskCalls[0]?.opts.runnerMode, 'script', 'default → script');
     assert.equal(record.startDevelopTaskCalls[0]?.runId, FAKE_RUN_ID, 'runId forwarded');
+    assert.equal(record.pollStateCalls.length, 1, 'pollState must be called once');
+    assert.equal(record.pollStateCalls[0]?.runId, FAKE_RUN_ID, 'pollState runId forwarded');
+    assert.equal(record.pollStateCalls[0]?.pollOpts?.wait, false, 'wait:false by default');
   } finally {
     process.exitCode = origExitCode as number | undefined;
   }
@@ -189,6 +206,207 @@ test('run start --live: WARNING emitted BEFORE startDevelopTask (ordering)', asy
     assert.ok(warnIdx < startIdx, 'warning must be emitted BEFORE startDevelopTask');
   } finally {
     console.warn = origWarn;
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+// ─── 0006: --wait threading ────────────────────────────────────────────────────
+
+test('run start --wait → pollState receives {wait:true}', async () => {
+  const { deps, record } = buildFakeDeps({});
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await runStartCore(FAKE_RUN_ID, { stub: false, live: false, wait: true }, deps);
+    assert.equal(record.pollStateCalls.length, 1, 'pollState must be called once');
+    assert.equal(record.pollStateCalls[0]?.pollOpts?.wait, true, '--wait must set wait:true in PollOpts');
+  } finally {
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+test('run start (no --wait) → pollState receives {wait:false}', async () => {
+  const { deps, record } = buildFakeDeps({});
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await runStartCore(FAKE_RUN_ID, { stub: false, live: false, wait: false }, deps);
+    assert.equal(record.pollStateCalls.length, 1, 'pollState must be called once');
+    assert.equal(record.pollStateCalls[0]?.pollOpts?.wait, false, 'no --wait must set wait:false in PollOpts');
+  } finally {
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+test('run start --wait (no wait field) → pollState receives wait:false by default', async () => {
+  const { deps, record } = buildFakeDeps({});
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    // Omit wait field (as if old callers pass {stub, live} only)
+    await runStartCore(FAKE_RUN_ID, { stub: false, live: false }, deps);
+    assert.equal(record.pollStateCalls.length, 1);
+    // wait defaults to false when not provided
+    assert.equal(record.pollStateCalls[0]?.pollOpts?.wait, false, 'missing wait defaults to false');
+  } finally {
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+// ─── createRunCore tests (B+C: pre-validation before write) ──────────────────
+
+/** Fake INestApplicationContext — only identity matters; methods unused in tests. */
+const FAKE_APP = {} as unknown as INestApplicationContext;
+
+type CreateRecord = {
+  createRunCalls: number;
+  runStartCalls: Array<{ runId: string; opts: { stub: boolean; live: boolean; wait: boolean } }>;
+};
+
+function buildCreateDeps(opts: {
+  app?: INestApplicationContext;
+  runId?: string;
+}): { deps: CreateRunDeps; record: CreateRecord } {
+  const record: CreateRecord = { createRunCalls: 0, runStartCalls: [] };
+  const resolvedRunId = opts.runId ?? 'run-create-test-001';
+
+  const deps: CreateRunDeps = {
+    createRunFn: async (_input) => {
+      record.createRunCalls++;
+      return {
+        runId: resolvedRunId,
+        taskId: 'task-create-001',
+        stepId: 'step-create-001',
+        status: 'ready',
+        eventId: 'event-create-001',
+      };
+    },
+    runStart: async (runId, startOpts) => {
+      record.runStartCalls.push({ runId, opts: startOpts });
+    },
+    app: opts.app,
+  };
+
+  return { deps, record };
+}
+
+function buildCreateOptions(overrides: Partial<{
+  title: string; repo: string; description?: string; scope?: string;
+  priority: string; role: string; start: boolean; wait: boolean; stub: boolean; live: boolean;
+}>): Parameters<typeof createRunCore>[0] {
+  return {
+    title: 'Test run',
+    repo: 'test/repo',
+    priority: '0',
+    role: 'architect',
+    start: false,
+    wait: false,
+    stub: false,
+    live: false,
+    ...overrides,
+  };
+}
+
+test('run create --start without app → host-required error + exitCode=1 + createRunFn NOT called + runStart NOT called', async () => {
+  const { deps, record } = buildCreateDeps({ app: undefined });
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+  try {
+    await createRunCore(buildCreateOptions({ start: true }), deps);
+    assert.equal(process.exitCode, 1, 'exitCode must be 1 when app is absent');
+    assert.equal(record.createRunCalls, 0, 'createRunFn must NOT be called — no orphan draft');
+    assert.equal(record.runStartCalls.length, 0, 'runStart must NOT be called');
+    assert.ok(
+      errors.some((e) => e.toLowerCase().includes('host')),
+      `error must mention host context; got: ${JSON.stringify(errors)}`,
+    );
+  } finally {
+    console.error = origError;
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+test('run create --start --stub --live → exitCode=1 + createRunFn NOT called (no orphan draft) + runStart NOT called', async () => {
+  const { deps, record } = buildCreateDeps({ app: FAKE_APP });
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+  try {
+    await createRunCore(buildCreateOptions({ start: true, stub: true, live: true }), deps);
+    assert.equal(process.exitCode, 1, 'exitCode must be 1 on --stub --live contradiction');
+    assert.equal(record.createRunCalls, 0, 'createRunFn must NOT be called — no orphan draft');
+    assert.equal(record.runStartCalls.length, 0, 'runStart must NOT be called');
+    assert.ok(
+      errors.some((e) => e.toLowerCase().includes('either')),
+      `error must mention choose-one; got: ${JSON.stringify(errors)}`,
+    );
+  } finally {
+    console.error = origError;
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+test('run create --start + app (valid) → run created once, runStart called exactly once with {stub,live,wait}', async () => {
+  const { deps, record } = buildCreateDeps({ app: FAKE_APP });
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => { logs.push(String(args[0])); };
+  try {
+    await createRunCore(buildCreateOptions({ start: true, stub: true, live: false, wait: false }), deps);
+    assert.equal(record.createRunCalls, 1, 'createRunFn must be called exactly once');
+    assert.equal(record.runStartCalls.length, 1, 'runStart must be called exactly once');
+    assert.deepEqual(
+      record.runStartCalls[0]?.opts,
+      { stub: true, live: false, wait: false },
+      'runStart must receive the correct {stub, live, wait} flags',
+    );
+    assert.ok(
+      logs.some((l) => l.includes('run-create-test-001')),
+      `created run ID must be printed; got: ${JSON.stringify(logs)}`,
+    );
+  } finally {
+    console.log = origLog;
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+test('run create --start --wait → wait:true threaded into runStart', async () => {
+  const { deps, record } = buildCreateDeps({ app: FAKE_APP });
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const origLog = console.log;
+  console.log = () => undefined;
+  try {
+    await createRunCore(buildCreateOptions({ start: true, wait: true }), deps);
+    assert.equal(record.runStartCalls.length, 1, 'runStart must be called once');
+    assert.equal(record.runStartCalls[0]?.opts.wait, true, '--wait must be threaded into runStart');
+  } finally {
+    console.log = origLog;
+    process.exitCode = origExitCode as number | undefined;
+  }
+});
+
+test('run create (non-start) → run created, runStart NOT called', async () => {
+  const { deps, record } = buildCreateDeps({ app: undefined });
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const origLog = console.log;
+  console.log = () => undefined;
+  try {
+    await createRunCore(buildCreateOptions({ start: false }), deps);
+    assert.equal(record.createRunCalls, 1, 'createRunFn must be called once');
+    assert.equal(record.runStartCalls.length, 0, 'runStart must NOT be called in non-start mode');
+    // exitCode must remain unset (success)
+    assert.notEqual(process.exitCode, 1, 'exitCode must not be 1 for a successful non-start create');
+  } finally {
+    console.log = origLog;
     process.exitCode = origExitCode as number | undefined;
   }
 });

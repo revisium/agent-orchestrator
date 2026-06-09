@@ -22,7 +22,7 @@ import { ControlPlaneError } from '../../control-plane/index.js';
 import type { InboxService } from '../../revisium/inbox.service.js';
 import type { InboxItem } from '../../control-plane/inbox.js';
 import { withRevisiumService } from './revisium-context.js';
-import { pollWorkflowState } from './poll-workflow-state.js';
+import { pollWorkflowState, type PollOpts } from './poll-workflow-state.js';
 
 /** Topics recognized as gate topics (must match AwaitHuman topics). */
 const GATE_TOPICS = new Set<string>(['plan', 'merge']);
@@ -37,6 +37,7 @@ type ResolveOptions = {
   approve: boolean;
   reject: boolean;
   by?: string;
+  wait?: boolean;
 };
 
 function formatCause(error: unknown): string {
@@ -175,7 +176,7 @@ export type InboxResolveDeps = {
   getInbox: (id: string) => Promise<InboxItem | null>;
   resolveInbox: (itemId: string, answer: unknown, resolvedBy: string) => Promise<{ status: 'pending' | 'resolved'; answer: unknown }>;
   signal: (workflowId: string, topic: string, payload: unknown, idempotencyKey: string) => Promise<void>;
-  pollRunState: (runId: string) => Promise<void>;
+  pollRunState: (runId: string, pollOpts?: PollOpts) => Promise<void>;
 };
 
 /**
@@ -227,7 +228,7 @@ async function resolveGatePath(
   console.log('awaiting next gate or completion…');
 
   // Poll for next-gate/terminal (same logic as run start, §3.6).
-  await deps.pollRunState(row.runId);
+  await deps.pollRunState(row.runId, { wait: options.wait ?? false });
   return true;
 }
 
@@ -319,9 +320,9 @@ async function inboxResolve(
       if (!dbosService) throw new Error('signal requires host context');
       return dbosService.signal(workflowId, topic, payload, idempotencyKey);
     },
-    pollRunState: (runId) =>
+    pollRunState: (runId, pollOpts) =>
       withInboxService((svc) =>
-        pollWorkflowState(runId, dbosService ?? { getWorkflowStatus: async () => null }, svc),
+        pollWorkflowState(runId, dbosService ?? { getWorkflowStatus: async () => null }, svc, pollOpts),
       ),
   };
 
@@ -364,5 +365,10 @@ export function registerInbox(program: Command, app?: INestApplicationContext): 
     .option('--approve', 'Approve a gate row (plan/merge)', false)
     .option('--reject', 'Reject a gate row (plan/merge)', false)
     .option('--by <who>', 'Resolver identifier', 'cli')
+    .option(
+      '--wait',
+      'Keep a live viewer attached through step transitions until the run parks at the next gate or finishes',
+      false,
+    )
     .action((id: string, options: ResolveOptions) => inboxResolve(id, options, app));
 }

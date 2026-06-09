@@ -11,6 +11,10 @@
  * inside the control-plane/run layer that RevisiumModule fronts).
  *
  * M5 (TASK 0003): `registerRun(program, app?)` — lazy pipeline import like dev.ts (F10).
+ *
+ * 0006 (B+C): createRunCore exported for unit testing. Validates all start-mode
+ * preconditions BEFORE writing any rows, so invalid combos (--stub --live, no app)
+ * leave zero orphan drafts. Production createRun is a thin wrapper around it.
  */
 import { Command } from 'commander';
 import type { INestApplicationContext } from '@nestjs/common';
@@ -20,12 +24,13 @@ import { formatRunList, formatRunDetail, formatEventList } from '../../run/inspe
 import type { RunService } from '../../revisium/run.service.js';
 import { withRevisiumService } from './revisium-context.js';
 import { sanitizeWorkflowID } from './dev.js';
-import { pollWorkflowState } from './poll-workflow-state.js';
+import { pollWorkflowState, type PollOpts } from './poll-workflow-state.js';
 import { assertNoStubLive, warnLiveCost } from '../live-guard.js';
 
 type StartOptions = {
   stub: boolean;
   live: boolean;
+  wait: boolean;
 };
 
 type CreateOptions = {
@@ -35,6 +40,10 @@ type CreateOptions = {
   scope?: string;
   priority: string;
   role: string;
+  start: boolean;
+  wait: boolean;
+  stub: boolean;
+  live: boolean;
 };
 
 type ListOptions = {
@@ -72,10 +81,11 @@ async function resolvePipelineService(app: INestApplicationContext) {
 async function runPollWorkflowState(
   runId: string,
   dbosService: { getWorkflowStatus: (id: string) => Promise<{ status: string } | null> },
+  pollOpts: PollOpts = {},
 ): Promise<void> {
   const { InboxService: InboxServiceClass } = await import('../../revisium/inbox.service.js');
   await withRevisiumService(InboxServiceClass, (inboxSvc) =>
-    pollWorkflowState(runId, dbosService, inboxSvc),
+    pollWorkflowState(runId, dbosService, inboxSvc, pollOpts),
   );
 }
 
@@ -96,7 +106,7 @@ export type RunStartDeps = {
     opts: { runnerMode: 'script' | 'live' },
   ) => Promise<{ workflowID: string }>;
   /** Poll until the workflow reaches a parked or terminal state. */
-  pollState: (runId: string) => Promise<void>;
+  pollState: (runId: string, pollOpts?: PollOpts) => Promise<void>;
 };
 
 /**
@@ -108,7 +118,7 @@ export type RunStartDeps = {
  */
 export async function runStartCore(
   safeRunId: string,
-  options: StartOptions,
+  options: { stub: boolean; live: boolean; wait?: boolean },
   deps: RunStartDeps,
 ): Promise<void> {
   // Validate flag combination: --stub + --live is an error
@@ -148,9 +158,9 @@ export async function runStartCore(
     }
   }
 
-  // 0004 §3.6: poll for parked or terminal state.
+  // 0004 §3.6: poll for parked or terminal state; thread --wait through to the viewer.
   console.log('awaiting settled state (parked or terminal)…');
-  await deps.pollState(safeRunId);
+  await deps.pollState(safeRunId, { wait: options.wait ?? false });
 }
 
 /**
@@ -200,7 +210,7 @@ async function runStart(
       getRun: (id) => withRevisiumService(RunServiceClass, (svc) => svc.getRun(id)),
       getWorkflowStatus: (id) => dbosService.getWorkflowStatus(id),
       startDevelopTask: (id, opts) => pipeline.startDevelopTask(id, opts),
-      pollState: (id) => runPollWorkflowState(id, dbosService),
+      pollState: (id, pollOpts) => runPollWorkflowState(id, dbosService, pollOpts),
     };
 
     await runStartCore(safeRunId, options, deps);
@@ -261,23 +271,88 @@ async function withRunService<T>(fn: (svc: RunService) => Promise<T>): Promise<T
   return withRevisiumService(RunServiceClass, fn);
 }
 
-async function createRun(options: CreateOptions): Promise<void> {
-  try {
-    const input: CreateRunInput = {
-      title: options.title,
-      repo: options.repo,
-      description: options.description,
-      scope: options.scope,
-      priority: parsePriority(options.priority),
-      role: options.role,
-    };
-    const result = await withRunService((svc) => svc.createRun(input));
+/**
+ * CreateRunDeps — injectable deps for createRunCore (mirrors RunStartDeps pattern).
+ *
+ * Production wiring: built by createRun from the live context.
+ * Tests: inject fakes directly, skipping NestJS context creation entirely.
+ */
+export type CreateRunDeps = {
+  /** Create the run/task/step/event and return IDs. */
+  createRunFn: (input: CreateRunInput) => Promise<{ runId: string; taskId: string; stepId: string; status: string; eventId: string }>;
+  /** Start the pipeline for a given runId (host-requiring). */
+  runStart: (runId: string, opts: { stub: boolean; live: boolean; wait: boolean }) => Promise<void>;
+  /** The host app context — present only on the host path. */
+  app: INestApplicationContext | undefined;
+};
 
-    console.log(`created run ${result.runId}`);
-    console.log(`task ${result.taskId}`);
-    console.log(`step ${result.stepId} ${result.status}`);
-    console.log(`event ${result.eventId}`);
-    console.log('status: ready (draft only, not committed)');
+/**
+ * createRunCore — testable core of `run create`.
+ *
+ * Exported for unit tests (mirrors C1 pattern from runStartCore): tests inject fake
+ * CreateRunDeps and assert the correct error paths WITHOUT creating a NestJS context.
+ * Production: called by createRun after building the real deps.
+ *
+ * Key invariant (B+C fix): ALL start-mode preconditions are validated BEFORE any write.
+ * If validation fails, NO run is created and process.exitCode is set to 1.
+ *   (a) --start without app → host-required error, return, zero writes.
+ *   (b) --start --stub --live → contradiction error (via assertNoStubLive), return, zero writes.
+ * Only after both checks pass is createRunFn called, then runStart exactly once.
+ *
+ * Cost-guard: live is only forwarded to runStart which maps it → 'live' runnerMode; the
+ * throwing claudeCode runner is never reached without explicit --live (0005 guard intact).
+ */
+export async function createRunCore(
+  options: CreateOptions,
+  deps: CreateRunDeps,
+): Promise<void> {
+  // Validate start-mode preconditions BEFORE any write (B+C fix: no orphan drafts).
+  if (options.start) {
+    if (!deps.app) {
+      console.error('run create --start requires the host context — invoke via the host path');
+      process.exitCode = 1;
+      return;
+    }
+    // assertNoStubLive returns false and sets exitCode=1 on contradiction.
+    if (!assertNoStubLive(options.stub ?? false, options.live ?? false)) {
+      return;
+    }
+  }
+
+  // Validation passed (or non-start path) — proceed with the write.
+  const result = await deps.createRunFn({
+    title: options.title,
+    repo: options.repo,
+    description: options.description,
+    scope: options.scope,
+    priority: parsePriority(options.priority),
+    role: options.role,
+  });
+
+  console.log(`created run ${result.runId}`);
+  console.log(`task ${result.taskId}`);
+  console.log(`step ${result.stepId} ${result.status}`);
+  console.log(`event ${result.eventId}`);
+  console.log('status: ready (draft only, not committed)');
+
+  // --start: chain into runStart exactly once (no inline second enqueue).
+  if (options.start) {
+    await deps.runStart(result.runId, {
+      stub: options.stub,
+      live: options.live,
+      wait: options.wait,
+    });
+  }
+}
+
+async function createRun(options: CreateOptions, app?: INestApplicationContext): Promise<void> {
+  try {
+    const deps: CreateRunDeps = {
+      createRunFn: (input) => withRunService((svc) => svc.createRun(input)),
+      runStart: (runId, startOpts) => runStart(runId, startOpts, app),
+      app,
+    };
+    await createRunCore(options, deps);
   } catch (error) {
     if (error instanceof CreateRunWorkflowError) {
       console.error(`Error: ${error.message}: ${formatCause(error.cause)}`);
@@ -417,6 +492,11 @@ export function registerRun(program: Command, app?: INestApplicationContext): vo
       'Use the REAL Claude runner AND the real git/gh integrator — THIS WILL CALL claude, INCUR COST, AND PUSH/OPEN A PR',
       false,
     )
+    .option(
+      '--wait',
+      'Keep a live viewer attached through step transitions until the run parks at a gate or finishes',
+      false,
+    )
     .action((runId: string, options: StartOptions) => runStart(runId, options, app));
 
   run
@@ -427,7 +507,19 @@ export function registerRun(program: Command, app?: INestApplicationContext): vo
     .option('--scope <text>', 'Run scope')
     .option('--priority <n>', 'Run priority', '0')
     .option('--role <name>', 'Initial step role (architect|developer|reviewer|integrator|pr-watcher)', 'architect')
-    .action(createRun);
+    .option('--start', 'Immediately start the pipeline workflow after creating the run (host-requiring)', false)
+    .option(
+      '--wait',
+      'After starting, keep a live viewer attached until the run parks at a gate or finishes',
+      false,
+    )
+    .option('--stub', 'With --start: use the zero-cost stub runner (default behavior)', false)
+    .option(
+      '--live',
+      'With --start: use the REAL Claude runner + real git/gh integrator (cost + PR)',
+      false,
+    )
+    .action((options: CreateOptions) => createRun(options, app));
 
   run
     .command('list')
