@@ -102,7 +102,7 @@ export type IntegratorBlocked = {
 const SLUG_MAX = 40;
 
 /** Deterministic branch-name slug from title: lowercase, non-alnum runs → '-', trim/truncate. */
-function slugify(title: string): string {
+export function slugify(title: string): string {
   return title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -113,7 +113,7 @@ function slugify(title: string): string {
 }
 
 /** Derive deterministic feature branch name from taskId + title. */
-function branchName(taskId: string, title: string): string {
+export function branchName(taskId: string, title: string): string {
   const slug = slugify(title) || slugify(taskId) || 'task';
   return `feat/${taskId}-${slug}`;
 }

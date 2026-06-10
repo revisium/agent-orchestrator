@@ -12,6 +12,8 @@ import {
   stubIntegrate,
   preflightLive,
   resolveExecutable,
+  slugify,
+  branchName,
   type IntegratorInput,
   type IntegratorDeps,
   type ExecFn,
@@ -831,4 +833,37 @@ test('resolveExecutable: PATH with empty segments → skipped gracefully', () =>
   const paddedPath = `${path.delimiter}${path.delimiter}${nodeDir}`;
   const resolved = resolveExecutable(nodeName, paddedPath);
   assert.ok(path.isAbsolute(resolved), `must still resolve with empty PATH segments: ${resolved}`);
+});
+
+// ─── slugify (direct unit tests) ─────────────────────────────────────────────
+
+test('slugify: normalises mixed-case and non-alnum separators', () => {
+  assert.equal(slugify('Hello World!'), 'hello-world');
+});
+
+test('slugify: collapses multiple separators into one dash', () => {
+  assert.equal(slugify('  foo   bar  '), 'foo-bar');
+});
+
+test('slugify: empty string returns empty string', () => {
+  assert.equal(slugify(''), '');
+});
+
+test('slugify: truncates to 40 characters', () => {
+  const long = 'a'.repeat(50);
+  assert.equal(slugify(long).length, 40);
+});
+
+// ─── branchName (direct unit tests) ──────────────────────────────────────────
+
+test('branchName: normal title produces feat/<taskId>-<slug>', () => {
+  assert.equal(branchName('task-42', 'Add feature X'), 'feat/task-42-add-feature-x');
+});
+
+test('branchName: empty title falls back to taskId slug', () => {
+  assert.equal(branchName('task-99', ''), 'feat/task-99-task-99');
+});
+
+test('branchName: title and taskId both produce empty slug → falls back to literal "task"', () => {
+  assert.equal(branchName('!!!', '!!!'), 'feat/!!!-task');
 });
