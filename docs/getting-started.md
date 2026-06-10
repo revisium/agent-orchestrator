@@ -3,6 +3,22 @@
 Run a local Revisium daemon as the orchestrator's control plane, bootstrap its schema, and drive the
 architect→developer→reviewer→integrator pipeline from a single command.
 
+## Install
+
+```bash
+npm i -g @revisium/orchestrator@alpha   # global install from the alpha dist-tag
+revo --version                          # prints 0.1.0-alpha.0 (from dist, not tsx)
+```
+
+> **Node 24.11.x required** — the `@revisium/standalone` daemon dependency declares
+> `engines: ">=24.11.1 <25"`. `npm i` on an unsupported Node version prints a warning;
+> the daemon will fail to start.
+
+Installed users run `revo …` (global bin). In-repo development can use `./bin/revo.js …`
+(runs the built `dist/`, so `npm run build` must be run first) or `npm run revo -- <args>`
+(runs `tsx src/cli/index.ts` directly from source, no build step needed). Both invocation
+styles are shown below.
+
 ## The model (two processes, one Postgres)
 
 Two processes share one embedded Postgres server:
@@ -26,18 +42,20 @@ See [architecture-overview.md](./architecture-overview.md) and
 
 ## Prerequisites
 
-- **Node.js `>=24.11.1 <25`** — check with `node --version`.
-- `npm install` in `agent-orchestrator/` (installs the standalone runtime + native deps).
-- `npm run build` (compiles TypeScript).
+- **Node.js 24.11.x** (`>=24.11.1 <25`) — check with `node --version`. This range is imposed by
+  the `@revisium/standalone` daemon dependency; a wider range is not supported.
+- For in-repo development: `npm install` in `agent-orchestrator/` and `npm run build`.
 - `gh` auth + a clean target repo are needed only for the `--live` path (real Claude + real PR).
   The zero-cost stub path requires none of these.
+- `bootstrap` fetches `npx -y revisium@2.5.0-alpha.6` on first run — network access is required
+  for that one-time step; subsequent `revo` commands work offline.
 
 ## Step 1 — start the control plane
 
 ```bash
 ./bin/revo.js revisium start     # first run ~60–120s (downloads embedded PostgreSQL); later ~8s
 ./bin/revo.js revisium status    # running on http://localhost:<resolvedPort> — health OK
-./bin/revo.js bootstrap --commit # creates the 10 control-plane tables and commits once
+./bin/revo.js bootstrap --commit # creates the 10 control-plane tables, seeds fixed roles/profiles, and commits
 ```
 
 **Ports:** preferred HTTP `19222` / pg `15440`. If busy, the CLI scans upward and `start` prints
@@ -45,10 +63,24 @@ the **resolved** port; it is also persisted in `runtime.json`. Never hardcode a 
 
 On first boot the host will also create the `dbos` database automatically (idempotent).
 
+`bootstrap --commit` also seeds the fixed roles (`architect`, `developer`, `reviewer`, `integrator`)
+and the three `model_profiles` (`deep`, `standard`, `cheap`). This is what lets the very first
+`run create --start` resolve `loadRole` and run the pipeline without error.
+
+**Re-running `bootstrap --commit`** is safe: it is create-or-skip (identical rows are silently
+skipped, no duplicates). It is NOT an update — if you later edit a seeded row in Revisium and
+re-run `bootstrap --commit`, it will conflict-throw on the drift and will NOT overwrite your
+change. To evolve an already-committed seed row, first edit (or delete) that row in Revisium,
+then re-run `bootstrap --commit`.
+
 ## Step 2 — create a run and start the pipeline (stub path, zero cost)
 
+Point at a repo with `--repo <path>` (required) and name the task with `--title <text>` (required).
+There is no separate project-create step — a run is created and pointed at a repo directly via
+`--repo`; no project object to create in the alpha.
+
 ```bash
-./bin/revo.js run create --title "my task" --repo . --start --wait
+./bin/revo.js run create --title "my task" --repo . --start --stub --wait
 ```
 
 This single command:
@@ -96,6 +128,7 @@ Live run: a real draft PR URL.
 ```bash
 ./bin/revo.js run create --title "my task" --repo . --start --wait --live
 ```
+> For installed users: `revo run create --title "my task" --repo /path/to/repo --start --wait --live`
 
 > WARNING: --live runs real Claude (claude -p) and incurs token cost on
 > architect/developer/reviewer, AND the real integrator will push a branch and open a draft PR.

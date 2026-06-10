@@ -1,16 +1,26 @@
 {
-  "name": "agent-orchestrator",
-  "version": "0.0.1",
-  "private": true,
+  "name": "@revisium/orchestrator",
+  "version": "0.1.0-alpha.0",
   "type": "module",
   "engines": {
     "node": ">=24.11.1 <25"
   },
+  "main": "./dist/cli/index.js",
   "bin": {
     "revo": "./bin/revo.js"
   },
+  "files": [
+    "dist/",
+    "bin/",
+    "control-plane/bootstrap.config.json",
+    "revisium.config.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "revo": "tsx src/cli/index.ts",
     "smoke:control-plane": "tsx scripts/smoke-control-plane-data-access.ts",
     "smoke:create-run": "tsx scripts/smoke-create-run.ts",
@@ -35,12 +45,12 @@
     "@nestjs/common": "11.1.24",
     "@nestjs/core": "11.1.24",
     "@revisium/client": "^0.6.0",
+    "@revisium/standalone": "^2.8.2",
     "commander": "^12.1.0",
     "pg": "8.21.0",
     "reflect-metadata": "0.2.2"
   },
   "devDependencies": {
-    "@revisium/standalone": "^2.7.2",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.20.0",
     "eslint": "^9.39.4",
