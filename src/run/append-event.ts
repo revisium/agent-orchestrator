@@ -13,6 +13,8 @@
 import type { ControlPlaneDataAccess } from '../control-plane/data-access.js';
 import { ControlPlaneError } from '../control-plane/errors.js';
 import { fnv1a64Hex } from '../control-plane/steps.js';
+import { redactSecrets } from '../control-plane/inbox.js';
+import { redactTokens } from '../runners/gh-identity.js';
 
 export type AppendEventInput = {
   runId: string;
@@ -65,6 +67,79 @@ export async function appendRunEvent(
       payload,
       actor: actor ?? 'orchestrator',
       created_at: createdAtIso,
+    });
+  } catch (e) {
+    if (e instanceof ControlPlaneError && e.code === 'ROW_CONFLICT') return;
+    throw e;
+  }
+}
+
+export type AppendAttemptInput = {
+  runId: string;
+  stepId: string;
+  /** Deterministic attempt id minted by the step (e.g. `attempt_<hash>`); used as the row id. */
+  attemptId: string;
+  attemptNo: number;
+  iteration: number;
+  status: string;
+  modelProfile: string;
+  verdict: string;
+  inputTokens: number;
+  outputTokens: number;
+  costAmount: number;
+  currency?: string;
+  durationMs: number;
+  /** Raw agent output — secret-redacted + capped here before persisting (never raw). */
+  output: unknown;
+  lesson?: string;
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+};
+
+/** Cap the serialized output summary so a giant agent payload can't bloat the attempts row. */
+const OUTPUT_SUMMARY_MAX = 4_000;
+
+/**
+ * Write a single per-attempt observability row to the `attempts` table (0008 #4).
+ *
+ * Populates the previously-unused `attempts` table so `revo run log` can show output summary,
+ * verdict, model, tokens, cost, duration, and iteration per attempt — the dogfood's observability
+ * gap (agent output was only recoverable indirectly via plan files / commit diffs).
+ *
+ * SECRET BOUNDARY: the output summary, lesson, and error are secret-redacted (object keys via
+ * redactSecrets, token shapes via redactTokens) before persisting — attempts live in Revisium.
+ *
+ * Idempotent: the row id IS the deterministic attemptId; ROW_CONFLICT is a no-op on replay.
+ */
+export async function appendRunAttempt(
+  da: ControlPlaneDataAccess,
+  input: AppendAttemptInput,
+): Promise<void> {
+  const summaryRaw = JSON.stringify(redactSecrets(input.output) ?? null);
+  const outputSummary = redactTokens(summaryRaw).slice(0, OUTPUT_SUMMARY_MAX);
+  try {
+    await da.createRow('attempts', input.attemptId, {
+      id: input.attemptId,
+      step_id: input.stepId,
+      run_id: input.runId,
+      worker_id: '',
+      attempt_no: input.attemptNo,
+      iteration: input.iteration,
+      status: input.status,
+      idempotency_key: input.attemptId,
+      model_profile: input.modelProfile,
+      verdict: input.verdict,
+      input_tokens: input.inputTokens,
+      output_tokens: input.outputTokens,
+      cost_amount: input.costAmount,
+      currency: input.currency ?? 'USD',
+      duration_ms: input.durationMs,
+      output_summary: outputSummary,
+      lesson: input.lesson ? redactTokens(input.lesson).slice(0, OUTPUT_SUMMARY_MAX) : '',
+      error: input.error ? redactTokens(input.error).slice(0, OUTPUT_SUMMARY_MAX) : '',
+      started_at: (input.startedAt ?? new Date()).toISOString(),
+      finished_at: (input.finishedAt ?? new Date()).toISOString(),
     });
   } catch (e) {
     if (e instanceof ControlPlaneError && e.code === 'ROW_CONFLICT') return;

@@ -128,6 +128,77 @@ test('pollWorkflowState wait:false — returns on first terminal status', async 
   }
 });
 
+test('pollWorkflowState — FAILURE terminal status surfaces the run_failed reason (0008 #2)', async () => {
+  const dbos = fakeDbos([{ status: 'ERROR' }]);
+  const inbox = fakeInbox(999);
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => logs.push(String(args[0]));
+  let readFailureCalls = 0;
+
+  try {
+    await pollWorkflowState('run-1', dbos, inbox, {
+      wait: false,
+      intervalMs: 1,
+      readFailure: async (id: string) => {
+        readFailureCalls++;
+        assert.equal(id, 'run-1');
+        return { runStatus: 'failed', reason: 'integrator: gh pr create failed' };
+      },
+    });
+    assert.equal(readFailureCalls, 1, 'readFailure must be consulted on a FAILURE terminal status');
+    assert.ok(logs.some((l) => l.includes('ERROR')), `expected status line; got ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('run failed: integrator: gh pr create failed')),
+      `expected run-failed reason; got ${JSON.stringify(logs)}`,
+    );
+  } finally {
+    console.log = origLog;
+  }
+});
+
+test('pollWorkflowState — SUCCESS terminal does NOT consult readFailure (0008 #2)', async () => {
+  const dbos = fakeDbos([{ status: 'SUCCESS' }]);
+  const inbox = fakeInbox(999);
+  const origLog = console.log;
+  console.log = () => {};
+  let readFailureCalls = 0;
+  try {
+    await pollWorkflowState('run-1', dbos, inbox, {
+      wait: false,
+      intervalMs: 1,
+      readFailure: async () => {
+        readFailureCalls++;
+        return null;
+      },
+    });
+    assert.equal(readFailureCalls, 0, 'readFailure must NOT be called on a non-failure terminal');
+  } finally {
+    console.log = origLog;
+  }
+});
+
+test('pollWorkflowState — FAILURE with run-row not patched surfaces the integrity gap (0008 #2)', async () => {
+  const dbos = fakeDbos([{ status: 'MAX_RECOVERY_ATTEMPTS_EXCEEDED' }]);
+  const inbox = fakeInbox(999);
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => logs.push(String(args[0]));
+  try {
+    await pollWorkflowState('run-1', dbos, inbox, {
+      wait: false,
+      intervalMs: 1,
+      readFailure: async () => ({ runStatus: 'ready' }), // no reason, run-row never patched
+    });
+    assert.ok(
+      logs.some((l) => l.includes('run-row status=ready')),
+      `expected integrity-gap note; got ${JSON.stringify(logs)}`,
+    );
+  } finally {
+    console.log = origLog;
+  }
+});
+
 test('pollWorkflowState wait:false — times out and prints note when no terminal/gate within cap', async () => {
   // status always null, inbox always empty
   const dbos = fakeDbos([null]);

@@ -32,14 +32,32 @@ function tail(text: string): string {
   return trimmed.length > ERROR_TAIL ? trimmed.slice(-ERROR_TAIL) : trimmed;
 }
 
+/** Read a positive number from a parsed model_profiles.params object, trying camel + snake keys. */
+function readParamNum(params: unknown, ...keys: string[]): number | undefined {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return undefined;
+  const rec = params as Record<string, unknown>;
+  for (const k of keys) {
+    const v = rec[k];
+    const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return undefined;
+}
+
 // CLI invocation — the only place flags are assembled. EXACT flag set is confirmed by the manual
-// Step-6 smoke before --runner defaults to auto. `--permission-mode default` keeps the headless run
+// Step-6 smoke before --runner defaults to auto. The permission mode keeps the headless run
 // non-interactive: a tool not in allowedTools is auto-denied (no TTY can prompt in -p mode).
-function buildArgs(modelId: string, allowedTools: string[]): string[] {
-  const args = ['-p', '--model', modelId, '--output-format', 'json', '--permission-mode', 'default'];
+// 0008 #5: permissionMode is now per-role DATA (was hardcoded 'default'); model_profiles.params
+// (previously unused "{}") is threaded in — a configured maxTurns maps to claude's --max-turns.
+function buildArgs(modelId: string, allowedTools: string[], permissionMode: string, params: unknown): string[] {
+  const args = ['-p', '--model', modelId, '--output-format', 'json', '--permission-mode', permissionMode];
   // Empty list → pass NO tools (most restrictive; text/plan-only). Never widen beyond role.allowedTools.
   if (allowedTools.length > 0) {
     args.push('--allowedTools', allowedTools.join(','));
+  }
+  const maxTurns = readParamNum(params, 'maxTurns', 'max_turns');
+  if (maxTurns !== undefined) {
+    args.push('--max-turns', String(Math.trunc(maxTurns)));
   }
   return args;
 }
@@ -75,7 +93,7 @@ function buildCosts(step: Step, profile: ModelProfile, env: TransportEnvelope): 
 }
 
 export function createClaudeCodeRunner(deps: ClaudeCodeRunnerDeps): RunAgent {
-  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const fallbackTimeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const command = deps.command ?? DEFAULT_COMMAND;
 
   return async ({ role, profile, context, attemptId, step }) => {
@@ -83,10 +101,13 @@ export function createClaudeCodeRunner(deps: ClaudeCodeRunnerDeps): RunAgent {
     const baseCwd = await deps.resolveCwd(step);
     const manager = deps.worktreeManager ?? noopWorktreeManager;
     const cwd = await manager.create(step.id, baseCwd);
+    // 0008 #5: per-role data overrides the hardcoded defaults (timeout + permission mode).
+    const timeoutMs = role.timeoutMs ?? fallbackTimeoutMs;
+    const permissionMode = role.permissionMode ?? 'default';
     try {
       const req: ExecRequest = {
         command,
-        args: buildArgs(profile.modelId, role.allowedTools),
+        args: buildArgs(profile.modelId, role.allowedTools, permissionMode, profile.params),
         cwd,
         timeoutMs,
         input: buildPrompt(context, attemptId),

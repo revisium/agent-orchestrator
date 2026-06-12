@@ -20,7 +20,7 @@ import { Command } from 'commander';
 import type { INestApplicationContext } from '@nestjs/common';
 import { ControlPlaneError } from '../../control-plane/index.js';
 import { CreateRunWorkflowError, type CreateRunInput } from '../../run/create-run.js';
-import { formatRunList, formatRunDetail, formatEventList } from '../../run/inspect-run.js';
+import { formatRunList, formatRunDetail, formatEventList, formatEventListVerbose, formatAttemptList } from '../../run/inspect-run.js';
 import type { RunService } from '../../revisium/run.service.js';
 import { withRevisiumService } from './revisium-context.js';
 import { sanitizeWorkflowID } from './dev.js';
@@ -60,6 +60,12 @@ type EventsOptions = {
   type?: string;
   limit?: string;
   json: boolean;
+  verbose: boolean;
+};
+
+type LogOptions = {
+  limit?: string;
+  json: boolean;
 };
 
 /**
@@ -84,8 +90,13 @@ async function runPollWorkflowState(
   pollOpts: PollOpts = {},
 ): Promise<void> {
   const { InboxService: InboxServiceClass } = await import('../../revisium/inbox.service.js');
+  const { RunService: RunServiceClass } = await import('../../revisium/run.service.js');
+  // 0008 #2: surface the run_failed reason on a FAILURE terminal status. The reader opens its own
+  // short-lived Revisium context per call (the poll loop only reads it once, on the terminal tick).
+  const readFailure: PollOpts['readFailure'] = (id) =>
+    withRevisiumService(RunServiceClass, (svc) => svc.getRunFailure(id));
   await withRevisiumService(InboxServiceClass, (inboxSvc) =>
-    pollWorkflowState(runId, dbosService, inboxSvc, pollOpts),
+    pollWorkflowState(runId, dbosService, inboxSvc, { ...pollOpts, readFailure }),
   );
 }
 
@@ -215,16 +226,25 @@ async function runStart(
 
     await runStartCore(safeRunId, options, deps);
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
+}
+
+/**
+ * reportRunCliError — shared error reporter for the `run` subcommands.
+ * Prints a uniform Error line (+ hint for ControlPlaneError) and sets exitCode=1.
+ * Extracted to remove the catch-block duplication the per-command handlers shared.
+ */
+export function reportRunCliError(error: unknown): void {
+  if (error instanceof ControlPlaneError) {
+    console.error(`Error: ${formatCause(error)}`);
+    printHint(error, false);
+  } else if (error instanceof Error) {
+    console.error(`Error: ${error.message}`);
+  } else {
+    console.error(`Error: ${String(error)}`);
+  }
+  process.exitCode = 1;
 }
 
 export function formatCause(error: unknown): string {
@@ -362,15 +382,10 @@ async function createRun(options: CreateOptions, app?: INestApplicationContext):
       if (error.cause instanceof ControlPlaneError) {
         printHint(error.cause, Object.keys(error.createdIds).length > 0);
       }
-    } else if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
+      process.exitCode = 1;
     } else {
-      console.error(`Error: ${String(error)}`);
+      reportRunCliError(error);
     }
-    process.exitCode = 1;
   }
 }
 
@@ -384,15 +399,7 @@ async function runList(options: ListOptions): Promise<void> {
       console.log(formatRunList(runs));
     }
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
@@ -410,15 +417,7 @@ async function runShow(runId: string, options: ShowOptions): Promise<void> {
       console.log(formatRunDetail(detail));
     }
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
@@ -436,20 +435,41 @@ async function runEvents(runId: string, options: EventsOptions): Promise<void> {
       const events = await svc.listRunEvents(runId, { type: options.type, limit });
       if (options.json) {
         process.stdout.write(JSON.stringify(events, null, 2) + '\n');
+      } else if (options.verbose) {
+        console.log(formatEventListVerbose(events));
       } else {
         console.log(formatEventList(events));
       }
     });
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
+  }
+}
+
+/**
+ * run log <runId> — per-attempt observability dump (0008 #4).
+ * Reads the previously-unused attempts table: output summary, verdict, model, tokens, cost,
+ * duration, iteration, status — closing the dogfood's "agent output not surfaced" gap.
+ */
+async function runLog(runId: string, options: LogOptions): Promise<void> {
+  try {
+    const limit = parseLimit(options.limit, '--limit');
+    await withRunService(async (svc) => {
+      const found = await svc.getRun(runId);
+      if (!found) {
+        console.error(`run not found: ${runId}`);
+        process.exitCode = 1;
+        return;
+      }
+      const attempts = await svc.listRunAttempts(runId, { limit });
+      if (options.json) {
+        process.stdout.write(JSON.stringify(attempts, null, 2) + '\n');
+      } else {
+        console.log(formatAttemptList(attempts));
+      }
+    });
+  } catch (error) {
+    reportRunCliError(error);
   }
 }
 
@@ -467,15 +487,7 @@ async function runCancel(runId: string): Promise<void> {
       console.log(`cancelled run ${result.runId} (was ${result.previousStatus})`);
     }
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
@@ -543,7 +555,16 @@ export function registerRun(program: Command, app?: INestApplicationContext): vo
     .option('--type <type>', 'Filter by event type')
     .option('--limit <n>', 'Maximum number of results')
     .option('--json', 'Output as JSON', false)
+    .option('--verbose', 'Expand each event payload (agent output, verdict, reason)', false)
     .action(runEvents);
+
+  run
+    .command('log')
+    .description('Show per-attempt log for a run (output, verdict, model, tokens, cost, duration)')
+    .argument('<runId>', 'Run ID')
+    .option('--limit <n>', 'Maximum number of results')
+    .option('--json', 'Output as JSON', false)
+    .action(runLog);
 
   run
     .command('cancel')

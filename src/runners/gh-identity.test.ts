@@ -1,0 +1,96 @@
+/**
+ * gh-identity.test.ts — 0008 #1: gh account pinning (no ambient-account dependency).
+ *
+ * Exercises the REAL functions (resolveGhAccount / ghTokenEnvKey / resolveGhToken /
+ * makeExecGh / redactTokens) with an injected execFile fake — no real gh, no real token.
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  DEFAULT_GH_ACCOUNT,
+  resolveGhAccount,
+  ghTokenEnvKey,
+  resolveGhToken,
+  makeExecGh,
+  redactTokens,
+  type ExecFileFn,
+} from './gh-identity.js';
+
+test('resolveGhAccount: defaults to revisium-io when REVO_GH_ACCOUNT unset/blank', () => {
+  assert.equal(resolveGhAccount({}), DEFAULT_GH_ACCOUNT);
+  assert.equal(resolveGhAccount({ REVO_GH_ACCOUNT: '   ' }), DEFAULT_GH_ACCOUNT);
+});
+
+test('resolveGhAccount: honors an explicit non-secret account name', () => {
+  assert.equal(resolveGhAccount({ REVO_GH_ACCOUNT: 'my-bot' }), 'my-bot');
+});
+
+test('ghTokenEnvKey: derives an env-safe per-account key', () => {
+  assert.equal(ghTokenEnvKey('revisium-io'), 'GH_TOKEN_REVISIUM_IO');
+  assert.equal(ghTokenEnvKey('my.bot-9'), 'GH_TOKEN_MY_BOT_9');
+});
+
+test('resolveGhToken: env override GH_TOKEN_<ACCOUNT> wins without shelling out', () => {
+  let called = false;
+  const execFile: ExecFileFn = () => {
+    called = true;
+    return '';
+  };
+  const token = resolveGhToken('revisium-io', {
+    env: { GH_TOKEN_REVISIUM_IO: 'gho_fromenv' },
+    execFile,
+  });
+  assert.equal(token, 'gho_fromenv');
+  assert.equal(called, false, 'must NOT shell out to gh when env override is present');
+});
+
+test('resolveGhToken: falls back to `gh auth token --user <account>` keyring', () => {
+  let seenArgs: string[] = [];
+  const execFile: ExecFileFn = (_file, args) => {
+    seenArgs = args;
+    return 'gho_fromkeyring\n';
+  };
+  const token = resolveGhToken('revisium-io', { env: {}, execFile });
+  assert.equal(token, 'gho_fromkeyring');
+  assert.deepEqual(seenArgs, ['auth', 'token', '--user', 'revisium-io']);
+});
+
+test('resolveGhToken: returns undefined when gh fails (account not in keyring)', () => {
+  const execFile: ExecFileFn = () => {
+    throw new Error('no such account');
+  };
+  assert.equal(resolveGhToken('revisium-io', { env: {}, execFile }), undefined);
+});
+
+test('makeExecGh: pins GH_TOKEN on the spawned gh process when a token is supplied', () => {
+  let seenEnv: NodeJS.ProcessEnv | undefined;
+  const execFile: ExecFileFn = (_file, _args, opts) => {
+    seenEnv = opts.env;
+    return 'ok';
+  };
+  const exec = makeExecGh({ token: 'gho_pinned', execFile, env: { PATH: '/usr/bin' } });
+  const out = exec(['pr', 'create']);
+  assert.equal(out, 'ok');
+  assert.equal(seenEnv?.GH_TOKEN, 'gho_pinned', 'GH_TOKEN must be set so gh ignores the active account');
+  assert.equal(seenEnv?.PATH, '/usr/bin', 'base env must be preserved');
+});
+
+test('makeExecGh: leaves the ambient account untouched when no token is resolved', () => {
+  let seenEnv: NodeJS.ProcessEnv | undefined;
+  const execFile: ExecFileFn = (_file, _args, opts) => {
+    seenEnv = opts.env;
+    return 'ok';
+  };
+  const exec = makeExecGh({ execFile, env: { PATH: '/usr/bin' } });
+  exec(['pr', 'list']);
+  assert.equal(seenEnv?.GH_TOKEN, undefined, 'GH_TOKEN must NOT be injected when no token resolved');
+});
+
+test('redactTokens: masks GitHub token shapes in free text', () => {
+  const dirty =
+    'failed with gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 and github_pat_11ABCDEFG0abcdefghij1234567890';
+  const clean = redactTokens(dirty);
+  assert.ok(!clean.includes('gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345'), 'gho_ token must be masked');
+  assert.ok(!clean.includes('github_pat_11ABCDEFG0abcdefghij1234567890'), 'github_pat must be masked');
+  assert.match(clean, /\[REDACTED\]/);
+});

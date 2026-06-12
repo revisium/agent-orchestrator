@@ -36,9 +36,7 @@ import type { AppendEventInput } from '../run/append-event.js';
 import { makeAwaitHuman } from './await-human.js';
 import type { Decision } from './await-human.js';
 import type { CancelRunResult } from '../run/cancel-run.js';
-
-/** Maximum developer/reviewer rework iterations before failing closed. */
-const MAX_REVIEW_ITERATIONS = 3;
+import type { FailRunResult } from '../run/fail-run.js';
 
 /** Queue name for the dev-tasks WorkflowQueue. */
 const DEV_TASKS_QUEUE = 'dev-tasks';
@@ -108,7 +106,11 @@ export type RunStepDeps = {
   loadPipelineContext: RunService['loadPipelineContext'];
   appendEvent: (input: AppendEventInput) => Promise<void>;
   appendCost: RunService['appendCost'];
+  /** Persist a per-attempt observability row (0008 #4). */
+  appendAttempt: RunService['appendAttempt'];
   runAgent: RunAgent;
+  /** Monotonic clock for attempt duration (injectable for deterministic tests). Defaults to Date.now. */
+  now?: () => number;
 };
 
 /** Dependencies for the developTask builder. */
@@ -132,10 +134,21 @@ export type DevelopTaskDeps = {
    */
   cancelRun: (runId: string, opts?: { actor?: string; source?: string }) => Promise<CancelRunResult | null>;
   /**
+   * Mark a run failed (patch status → failed + write run_failed event). Idempotent, event-first.
+   * Called by the workflow body on a TERMINAL step failure so the Revisium run-row stops lying
+   * (DBOS=progress, Revisium=meaning). 0008 #2 — closes the silent-failure gap from the dogfood.
+   */
+  failRun: (runId: string, reason: string) => Promise<FailRunResult | null>;
+  /**
    * Load run task context once in the workflow body (B6).
    * Returns { taskId, title, base, repoRef } from showRun.tasks[0] + run.repos[0].
    */
   loadRunTaskContext: RunService['loadRunTaskContext'];
+  /**
+   * Load pipeline limits as DATA (0008 #5) — max review iterations, max attempts, run-level
+   * cost/token budget — from the routing_policy table. Falls back to safe defaults when absent.
+   */
+  loadPipelinePolicy: RolesService['loadPipelinePolicy'];
   /**
    * Real integrator — DBOS step (live only).
    * Execute git/gh ops (branch/commit/push/PR) in the target repo.
@@ -160,8 +173,17 @@ export type DevelopTaskDeps = {
  * PipelineService passes this to `dbos.registerStep(...)` so tests can import
  * and call it directly — exercising the SAME code path as production (C1).
  */
+/** Parse the rework iteration from a stepKey (`developer#2` → 2; `developer` → 0). */
+function iterationOf(stepKey: string): number {
+  const hashIdx = stepKey.lastIndexOf('#');
+  if (hashIdx < 0) return 0;
+  const n = Number.parseInt(stepKey.slice(hashIdx + 1), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export function makeRunStep(deps: RunStepDeps) {
-  const { loadRole, loadModelProfile, loadPipelineContext, appendEvent, appendCost, runAgent } = deps;
+  const { loadRole, loadModelProfile, loadPipelineContext, appendEvent, appendCost, appendAttempt, runAgent } = deps;
+  const clock = deps.now ?? (() => Date.now());
 
   return async function runStepImpl(
     runId: string,
@@ -197,8 +219,10 @@ export function makeRunStep(deps: RunStepDeps) {
       runnerMode === 'live' ? loadedRole.runner : 'script';
     const dispatchRole = { ...loadedRole, runner: effectiveRunner };
 
-    // 7. Run the agent.
+    // 7. Run the agent (timed for the attempt-row duration).
+    const startedAt = clock();
     const result = await runAgent({ role: dispatchRole, profile, context, attemptId, step });
+    const durationMs = Math.max(0, clock() - startedAt);
 
     // 8. Persist event to Revisium draft (idempotent — ROW_CONFLICT = no-op on replay).
     await appendEvent({
@@ -224,6 +248,38 @@ export function makeRunStep(deps: RunStepDeps) {
       });
     }
 
+    // 10. Persist the per-attempt observability row (0008 #4). Aggregate tokens/cost from the
+    //     cost records; extract the verdict; redact secrets on store. Idempotent by attemptId.
+    //     NON-FATAL: the attempts row is pure observability — a write failure (e.g. a control-plane
+    //     whose attempts schema predates 0008's fields, additionalProperties:false → VALIDATION_FAILURE)
+    //     must NEVER fail an otherwise-successful agent step. Log and continue.
+    const inputTokens = result.costs.reduce((sum, c) => sum + (c?.inputTokens ?? 0), 0);
+    const outputTokens = result.costs.reduce((sum, c) => sum + (c?.outputTokens ?? 0), 0);
+    const costAmount = result.costs.reduce((sum, c) => sum + (c?.costAmount ?? 0), 0);
+    try {
+      await appendAttempt({
+        runId,
+        stepId: step.id,
+        attemptId,
+        attemptNo: iterationOf(stepKey) + 1,
+        iteration: iterationOf(stepKey),
+        status: result.needsHuman ? 'awaiting_approval' : 'succeeded',
+        modelProfile: step.modelProfile,
+        verdict: verdictOf(result),
+        inputTokens,
+        outputTokens,
+        costAmount,
+        durationMs,
+        output: result.output,
+        lesson: result.lesson,
+      });
+    } catch (err) {
+      console.warn(
+        `[pipeline] attempt-row write failed for ${stepKey} (${attemptId}) — observability only, step still succeeds. ` +
+          `If this is a schema-drift error, migrate the control-plane attempts table to the 0008 fields. ${String(err)}`,
+      );
+    }
+
     return result;
   };
 }
@@ -246,9 +302,31 @@ export function makeDevelopTask(
   ) => Promise<AttemptResult>,
   deps: DevelopTaskDeps,
 ) {
-  const { appendEvent, awaitHuman, cancelRun, loadRunTaskContext, integrateFn, runStub, preflightFn } = deps;
+  const { appendEvent, awaitHuman, cancelRun, failRun, loadRunTaskContext, loadPipelinePolicy, integrateFn, runStub, preflightFn } = deps;
 
   return async function developTaskImpl(
+    runId: string,
+    opts?: DevelopTaskOpts,
+  ): Promise<DevelopResult> {
+    try {
+      return await runDevelopTaskBody(runId, opts);
+    } catch (err) {
+      // TERMINAL step failure (0008 #2): a step threw and propagated to the workflow body. Before
+      // re-throwing (so DBOS still records the workflow as ERROR — progress truth is preserved),
+      // mark the Revisium run-row `failed` + write a run_failed event so the run-row stops lying.
+      // failRun is idempotent (event-first, deterministic id) so DBOS recovery replays are no-ops.
+      const reason = err instanceof Error ? err.message : String(err);
+      try {
+        await failRun(runId, reason);
+      } catch (failErr) {
+        // Never let bookkeeping mask the original failure — log and re-throw the ORIGINAL error.
+        console.error(`[pipeline] failRun(${runId}) itself failed: ${String(failErr)}`);
+      }
+      throw err;
+    }
+  };
+
+  async function runDevelopTaskBody(
     runId: string,
     opts?: DevelopTaskOpts,
   ): Promise<DevelopResult> {
@@ -257,6 +335,48 @@ export function makeDevelopTask(
 
     // B6: resolve task context once at workflow start (deterministic pure read).
     const { taskId, title, base } = await loadRunTaskContext(runId);
+
+    // 0008 #5: pipeline limits are DATA (routing_policy), not hardcoded consts. Loaded once.
+    const policy = await loadPipelinePolicy();
+
+    // Run-level cost/token BUDGET (0008 #5): accrue each step's cost; a hard-stop blocks the run
+    // (pipeline_blocked, reason 'budget') rather than letting an unbounded loop burn the budget.
+    let spentUsd = 0;
+    let spentTokens = 0;
+    let iteration = 0;
+    const accrue = (r: AttemptResult): void => {
+      for (const c of r.costs) {
+        if (!c) continue;
+        spentUsd += c.costAmount ?? 0;
+        spentTokens += (c.inputTokens ?? 0) + (c.outputTokens ?? 0);
+      }
+    };
+    const overBudget = (): boolean =>
+      (policy.budgetUsd > 0 && spentUsd > policy.budgetUsd) ||
+      (policy.budgetTokens > 0 && spentTokens > policy.budgetTokens);
+    const blockBudget = async (): Promise<DevelopResult> => {
+      await appendEvent({
+        runId,
+        taskId,
+        stepId: '',
+        stepKey: 'pipeline',
+        type: 'pipeline_blocked',
+        payload: {
+          reason: 'budget',
+          spentUsd,
+          spentTokens,
+          budgetUsd: policy.budgetUsd,
+          budgetTokens: policy.budgetTokens,
+        },
+      });
+      return { runId, blocked: true, iterations: iteration, verdict: 'BLOCKED', cancelled: false };
+    };
+    // runStep — wraps runStepFn to accrue cost so the budget guard sees every step's spend.
+    const runStep = async (role: string, stepKey: string, input: unknown): Promise<AttemptResult> => {
+      const r = await runStepFn(runId, role, stepKey, input, mode);
+      accrue(r);
+      return r;
+    };
 
     // B5/B7: live preflight — one memoized DBOS step, evaluated exactly once.
     // Skipped entirely on script/stub runs (no git, no cost, no mutation beyond fetch).
@@ -276,13 +396,8 @@ export function makeDevelopTask(
     }
 
     // architect step
-    const architectResult = await runStepFn(
-      runId,
-      'architect',
-      'architect',
-      { phase: 'plan' },
-      mode,
-    );
+    const architectResult = await runStep('architect', 'architect', { phase: 'plan' });
+    if (overBudget()) return await blockBudget();
 
     // ── PLAN GATE (after architect, before developer) ──────────────────────────
     const planDecision = await awaitHuman(runId, 'plan', 'Plan approval', architectResult.output);
@@ -301,41 +416,33 @@ export function makeDevelopTask(
     // ── end PLAN GATE ──────────────────────────────────────────────────────────
 
     // developer step (first pass)
-    let developerResult = await runStepFn(
-      runId,
-      'developer',
-      'developer',
-      { phase: 'implement', from: architectResult.output },
-      mode,
-    );
+    let developerResult = await runStep('developer', 'developer', {
+      phase: 'implement',
+      from: architectResult.output,
+    });
+    if (overBudget()) return await blockBudget();
 
     // reviewer step (first pass)
-    let reviewResult = await runStepFn(
-      runId,
-      'reviewer',
-      'reviewer',
-      { phase: 'review', from: developerResult.output },
-      mode,
-    );
+    let reviewResult = await runStep('reviewer', 'reviewer', {
+      phase: 'review',
+      from: developerResult.output,
+    });
+    if (overBudget()) return await blockBudget();
 
-    // bounded reviewer→developer loop (E5, E6)
-    let iteration = 0;
-    while (isBlocking(verdictOf(reviewResult)) && iteration < MAX_REVIEW_ITERATIONS) {
+    // bounded reviewer→developer loop (E5, E6); iteration cap is DATA (0008 #5).
+    // Budget is checked after EVERY step so a hard-stop fires before the NEXT agent call burns spend.
+    while (isBlocking(verdictOf(reviewResult)) && iteration < policy.maxReviewIterations) {
       iteration++;
-      developerResult = await runStepFn(
-        runId,
-        'developer',
-        `developer#${iteration}`,
-        { phase: 'rework', feedback: reviewResult.output },
-        mode,
-      );
-      reviewResult = await runStepFn(
-        runId,
-        'reviewer',
-        `reviewer#${iteration}`,
-        { phase: 'review', from: developerResult.output },
-        mode,
-      );
+      developerResult = await runStep('developer', `developer#${iteration}`, {
+        phase: 'rework',
+        feedback: reviewResult.output,
+      });
+      if (overBudget()) return await blockBudget();
+      reviewResult = await runStep('reviewer', `reviewer#${iteration}`, {
+        phase: 'review',
+        from: developerResult.output,
+      });
+      if (overBudget()) return await blockBudget();
     }
 
     // Cap exhausted — still blocking: write pipeline_blocked and stop (E6).
@@ -455,6 +562,7 @@ export class PipelineService {
       loadPipelineContext: this.runService.loadPipelineContext.bind(this.runService),
       appendEvent: this.runService.appendEvent.bind(this.runService),
       appendCost: this.runService.appendCost.bind(this.runService),
+      appendAttempt: this.runService.appendAttempt.bind(this.runService),
       runAgent: this.runAgent,
     };
 
@@ -488,7 +596,9 @@ export class PipelineService {
       awaitHuman,
       cancelRun: (runId: string, cancelOpts?: { actor?: string; source?: string }) =>
         this.runService.cancelRun(runId, cancelOpts),
+      failRun: (runId: string, reason: string) => this.runService.failRun(runId, reason),
       loadRunTaskContext: this.runService.loadRunTaskContext.bind(this.runService),
+      loadPipelinePolicy: this.rolesService.loadPipelinePolicy.bind(this.rolesService),
       integrateFn,
       runStub: this.integratorService.runStub,
       preflightFn,

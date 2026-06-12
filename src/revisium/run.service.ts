@@ -6,9 +6,10 @@ import { fnv1a64Hex } from '../control-plane/steps.js';
 import type { Step } from '../control-plane/steps.js';
 import { makeResolveCwd, makeResolveTaskCwd } from '../control-plane/resolve-cwd.js';
 import { createRunWorkflow, type CreateRunInput, type CreateRunResult } from '../run/create-run.js';
-import { listRuns, showRun, listRunEvents, type RunSummary, type RunDetail, type EventSummary } from '../run/inspect-run.js';
+import { listRuns, showRun, listRunEvents, listRunAttempts, getRunFailure, type RunSummary, type RunDetail, type EventSummary, type AttemptSummary } from '../run/inspect-run.js';
 import { cancelRun, type CancelRunResult } from '../run/cancel-run.js';
-import { appendRunEvent, appendRunCost, type AppendEventInput, type AppendCostInput } from '../run/append-event.js';
+import { failRun, type FailRunResult } from '../run/fail-run.js';
+import { appendRunEvent, appendRunCost, appendRunAttempt, type AppendEventInput, type AppendCostInput, type AppendAttemptInput } from '../run/append-event.js';
 import { REVISIUM_TRANSPORT_DRAFT } from './tokens.js';
 
 /**
@@ -47,13 +48,32 @@ export class RunService {
     return listRunEvents(this.da, id, filter);
   }
 
+  /** List per-attempt observability rows for a run (0008 #4 — `revo run log`). */
+  listRunAttempts(id: string, filter?: { limit?: number }): Promise<AttemptSummary[]> {
+    return listRunAttempts(this.da, id, filter);
+  }
+
   cancelRun(id: string, opts?: { now?: Date; idSuffix?: string; actor?: string; source?: string }): Promise<CancelRunResult | null> {
     return cancelRun(this.da, id, opts);
+  }
+
+  /**
+   * failRun — patch task_runs to `failed` + write a run_failed event (0008 #2).
+   * Event-first + idempotent. Called by the pipeline workflow body on a terminal step failure
+   * so the Revisium run-row reflects the failure (DBOS=progress, Revisium=meaning).
+   */
+  failRun(id: string, reason: string, opts?: { now?: Date; actor?: string; source?: string }): Promise<FailRunResult | null> {
+    return failRun(this.da, id, reason, opts);
   }
 
   /** Expose getRun for events pre-check (run not found guard in CLI). */
   getRun(id: string): Promise<ControlPlaneRow | null> {
     return this.da.getRow('task_runs', id);
+  }
+
+  /** Read run-row status + the run_failed reason (0008 #2 — surfaced by `run start --wait`). */
+  getRunFailure(id: string): Promise<{ runStatus: string; reason?: string } | null> {
+    return getRunFailure(this.da, id);
   }
 
   /**
@@ -166,5 +186,13 @@ export class RunService {
    */
   appendCost(input: AppendCostInput): Promise<void> {
     return appendRunCost(this.da, input);
+  }
+
+  /**
+   * appendAttempt — write an idempotent per-attempt observability row to the draft attempts table.
+   * Wraps appendRunAttempt over the service's draft da (0008 #4).
+   */
+  appendAttempt(input: AppendAttemptInput): Promise<void> {
+    return appendRunAttempt(this.da, input);
   }
 }

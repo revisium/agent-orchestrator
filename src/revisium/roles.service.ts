@@ -1,6 +1,6 @@
 import { Injectable, Inject } from '@nestjs/common';
 import type { ControlPlaneTransport } from '../control-plane/data-access.js';
-import { loadRole, loadModelProfile, type Role, type ModelProfile } from '../control-plane/definitions.js';
+import { loadRole, loadModelProfile, loadPipelinePolicy, type Role, type ModelProfile, type PipelinePolicy } from '../control-plane/definitions.js';
 import { REVISIUM_TRANSPORT_HEAD } from './tokens.js';
 
 /**
@@ -20,5 +20,10 @@ export class RolesService {
 
   loadModelProfile(level: string): Promise<ModelProfile> {
     return loadModelProfile(level, this.head);
+  }
+
+  /** Load pipeline limits (max iterations/attempts, budget) from routing_policy (0008 #5). */
+  loadPipelinePolicy(): Promise<PipelinePolicy> {
+    return loadPipelinePolicy(this.head);
   }
 }
