@@ -226,16 +226,25 @@ async function runStart(
 
     await runStartCore(safeRunId, options, deps);
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
+}
+
+/**
+ * reportRunCliError — shared error reporter for the `run` subcommands.
+ * Prints a uniform Error line (+ hint for ControlPlaneError) and sets exitCode=1.
+ * Extracted to remove the catch-block duplication the per-command handlers shared.
+ */
+export function reportRunCliError(error: unknown): void {
+  if (error instanceof ControlPlaneError) {
+    console.error(`Error: ${formatCause(error)}`);
+    printHint(error, false);
+  } else if (error instanceof Error) {
+    console.error(`Error: ${error.message}`);
+  } else {
+    console.error(`Error: ${String(error)}`);
+  }
+  process.exitCode = 1;
 }
 
 export function formatCause(error: unknown): string {
@@ -373,15 +382,10 @@ async function createRun(options: CreateOptions, app?: INestApplicationContext):
       if (error.cause instanceof ControlPlaneError) {
         printHint(error.cause, Object.keys(error.createdIds).length > 0);
       }
-    } else if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
+      process.exitCode = 1;
     } else {
-      console.error(`Error: ${String(error)}`);
+      reportRunCliError(error);
     }
-    process.exitCode = 1;
   }
 }
 
@@ -395,15 +399,7 @@ async function runList(options: ListOptions): Promise<void> {
       console.log(formatRunList(runs));
     }
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
@@ -421,15 +417,7 @@ async function runShow(runId: string, options: ShowOptions): Promise<void> {
       console.log(formatRunDetail(detail));
     }
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
@@ -454,15 +442,7 @@ async function runEvents(runId: string, options: EventsOptions): Promise<void> {
       }
     });
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
@@ -489,15 +469,7 @@ async function runLog(runId: string, options: LogOptions): Promise<void> {
       }
     });
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
@@ -515,15 +487,7 @@ async function runCancel(runId: string): Promise<void> {
       console.log(`cancelled run ${result.runId} (was ${result.previousStatus})`);
     }
   } catch (error) {
-    if (error instanceof ControlPlaneError) {
-      console.error(`Error: ${formatCause(error)}`);
-      printHint(error, false);
-    } else if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-    } else {
-      console.error(`Error: ${String(error)}`);
-    }
-    process.exitCode = 1;
+    reportRunCliError(error);
   }
 }
 
