@@ -4,7 +4,8 @@ Repo-local context for coding agents (Claude Code, etc.). `CLAUDE.md` is a symli
 
 ## Method vs. context
 
-Reusable **method** (prompts, skills, practices) lives in the `../agents` repo (`anton62k/agents`) —
+Reusable **method** (prompts, skills, practices) lives in the `../agents` checkout of
+`revisium/agent-playbook` —
 "project repos contain context; `agents` contains method." This repo keeps **project context + code**.
 Project-local operational skills live in [`.agents/skills/`](./.agents/skills/).
 
