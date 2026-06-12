@@ -38,6 +38,25 @@ export type EventSummary = {
   createdAt: string;
   taskId: string;
   stepId: string;
+  /** Deserialized event payload (output/verdict/reason/…). Surfaced by `run events --verbose`. */
+  payload: unknown;
+};
+
+export type AttemptSummary = {
+  attemptId: string;
+  stepId: string;
+  iteration: number;
+  status: string;
+  verdict: string;
+  modelProfile: string;
+  inputTokens: number;
+  outputTokens: number;
+  costAmount: number;
+  durationMs: number;
+  outputSummary: string;
+  lesson: string;
+  error: string;
+  startedAt: string;
 };
 
 const GLOBAL_CAP = 500;
@@ -102,6 +121,26 @@ function toEventSummary(row: ControlPlaneRow): EventSummary {
     createdAt: str(row.data.created_at ?? row.createdAt),
     taskId: str(row.data.task_id),
     stepId: str(row.data.step_id),
+    payload: row.data.payload ?? null,
+  };
+}
+
+function toAttemptSummary(row: ControlPlaneRow): AttemptSummary {
+  return {
+    attemptId: row.rowId,
+    stepId: str(row.data.step_id),
+    iteration: num(row.data.iteration),
+    status: str(row.data.status),
+    verdict: str(row.data.verdict),
+    modelProfile: str(row.data.model_profile),
+    inputTokens: num(row.data.input_tokens),
+    outputTokens: num(row.data.output_tokens),
+    costAmount: num(row.data.cost_amount),
+    durationMs: num(row.data.duration_ms),
+    outputSummary: str(row.data.output_summary),
+    lesson: str(row.data.lesson),
+    error: str(row.data.error),
+    startedAt: str(row.data.started_at ?? row.createdAt),
   };
 }
 
@@ -178,6 +217,52 @@ export async function listRunEvents(
   if (filter?.type) events = events.filter((e) => e.type === filter.type);
   if (filter?.limit !== undefined) events = events.slice(0, filter.limit);
   return events;
+}
+
+/** List per-attempt observability rows for a run, oldest-first (0008 #4 — `run log`). */
+export async function listRunAttempts(
+  da: ControlPlaneDataAccess,
+  runId: string,
+  filter?: { limit?: number },
+): Promise<AttemptSummary[]> {
+  await da.assertReady();
+  const rows = await da.listRows('attempts', {
+    first: GLOBAL_CAP,
+    orderBy: [{ field: 'createdAt', direction: 'asc' }],
+    where: runIdWhere(runId),
+  });
+  let attempts = rows.map(toAttemptSummary);
+  if (filter?.limit !== undefined) attempts = attempts.slice(0, filter.limit);
+  return attempts;
+}
+
+/**
+ * getRunFailure — read the run-row status + the persisted run_failed reason (0008 #2).
+ *
+ * Used by `run start --wait` so a FAILURE terminal DBOS status surfaces WHY the run failed
+ * instead of a bare "status: ERROR". Returns null when the run does not exist.
+ */
+export async function getRunFailure(
+  da: ControlPlaneDataAccess,
+  runId: string,
+): Promise<{ runStatus: string; reason?: string } | null> {
+  await da.assertReady();
+  const runRow = await da.getRow('task_runs', runId);
+  if (!runRow) return null;
+  const runStatus = str(runRow.data.status);
+
+  const rows = await da.listRows('events', {
+    first: GLOBAL_CAP,
+    orderBy: [{ field: 'createdAt', direction: 'desc' }],
+    where: runIdWhere(runId),
+  });
+  const failed = rows.find((r) => str(r.data.type) === 'run_failed');
+  const payload = failed?.data.payload;
+  const reason =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>).reason
+      : undefined;
+  return { runStatus, reason: typeof reason === 'string' && reason.length > 0 ? reason : undefined };
 }
 
 // ─────────────────────── formatters ───────────────────────
@@ -258,4 +343,48 @@ export function formatEventList(events: EventSummary[]): string {
   });
   const summary = `(${events.length} event${events.length === 1 ? '' : 's'})`;
   return [header, ...lines, summary].join('\n');
+}
+
+/**
+ * formatEventListVerbose — like formatRunEvents but expands each event's payload (0008 #4).
+ * Surfaces the agent output / verdict / reason that the compact table drops.
+ */
+export function formatEventListVerbose(events: EventSummary[]): string {
+  const blocks = events.map((e) => {
+    const ts = e.createdAt ? e.createdAt.slice(0, 19) + 'Z' : '';
+    const head = `${e.type}  actor=${e.actor}  ${ts}  (${e.eventId})`;
+    const payloadJson = JSON.stringify(e.payload ?? null, null, 2)
+      .split('\n')
+      .map((l) => '    ' + l)
+      .join('\n');
+    return `${head}\n${payloadJson}`;
+  });
+  const summary = `(${events.length} event${events.length === 1 ? '' : 's'})`;
+  return [...blocks, summary].join('\n');
+}
+
+/** Two-decimal USD; '$0.0000' is overly noisy, so show 4 dp only when sub-cent. */
+function fmtUsd(amount: number): string {
+  return amount > 0 && amount < 0.01 ? `$${amount.toFixed(4)}` : `$${amount.toFixed(2)}`;
+}
+
+/**
+ * formatAttemptList — per-attempt observability dump for `run log <runId>` (0008 #4).
+ * Shows verdict, model, tokens, cost, duration, iteration, status, and the output summary.
+ */
+export function formatAttemptList(attempts: AttemptSummary[]): string {
+  if (attempts.length === 0) return '(0 attempts)';
+  const blocks = attempts.map((a) => {
+    const lines = [
+      `attempt  ${a.attemptId}  step=${a.stepId}`,
+      `  iter=${a.iteration}  status=${a.status}  verdict=${a.verdict || '-'}  model=${a.modelProfile || '-'}`,
+      `  tokens=${a.inputTokens}in/${a.outputTokens}out  cost=${fmtUsd(a.costAmount)}  duration=${a.durationMs}ms`,
+    ];
+    if (a.outputSummary) lines.push(`  output   ${a.outputSummary}`);
+    if (a.lesson) lines.push(`  lesson   ${a.lesson}`);
+    if (a.error) lines.push(`  error    ${a.error}`);
+    return lines.join('\n');
+  });
+  const summary = `(${attempts.length} attempt${attempts.length === 1 ? '' : 's'})`;
+  return [...blocks, summary].join('\n');
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadRole, loadModelProfile } from './definitions.js';
+import { loadRole, loadModelProfile, loadPipelinePolicy } from './definitions.js';
 import { ControlPlaneError } from './errors.js';
 import type { ControlPlaneTransport } from './client-transport.js';
 
@@ -159,4 +159,48 @@ test('loadRole: throws VALIDATION_FAILURE for invalid model_level', async () => 
       err.code === 'VALIDATION_FAILURE' &&
       err.message.includes('ultra-expensive'),
   );
+});
+
+// ─── loadPipelinePolicy (0008 #5) ────────────────────────────────────────────
+
+test('loadPipelinePolicy: parses the rule JSON for limits + budget', async () => {
+  const transport = makeTransport({
+    'routing_policy/pipeline': {
+      id: 'pipeline',
+      rule: '{"max_review_iterations":5,"max_attempts":4,"budget_usd":2.5,"budget_tokens":1000}',
+    },
+  });
+  const policy = await loadPipelinePolicy(transport);
+  assert.equal(policy.maxReviewIterations, 5);
+  assert.equal(policy.maxAttempts, 4);
+  assert.equal(policy.budgetUsd, 2.5);
+  assert.equal(policy.budgetTokens, 1000);
+});
+
+test('loadPipelinePolicy: absent row → safe defaults (routing_policy starts empty)', async () => {
+  const policy = await loadPipelinePolicy(makeTransport({}));
+  assert.equal(policy.maxReviewIterations, 3);
+  assert.equal(policy.maxAttempts, 3);
+  assert.equal(policy.budgetUsd, 0);
+  assert.equal(policy.budgetTokens, 0);
+});
+
+test('loadPipelinePolicy: MALFORMED rule JSON rethrows (does NOT silently disable the budget)', async () => {
+  const transport = makeTransport({
+    'routing_policy/pipeline': { id: 'pipeline', rule: '{not valid json' },
+  });
+  await assert.rejects(() => loadPipelinePolicy(transport), /JSON|Unexpected|token/i);
+});
+
+test('loadPipelinePolicy: transport error (non-404) rethrows', async () => {
+  const transport: ControlPlaneTransport = {
+    mode: 'head' as const,
+    async assertReady() {},
+    async listRows() { return { edges: [] }; },
+    async getRow() { throw new ControlPlaneError('HTTP_ERROR', 'boom'); },
+    async createRow() { throw new Error('ro'); },
+    async updateRow() { throw new Error('ro'); },
+    async patchRow() { throw new Error('ro'); },
+  };
+  await assert.rejects(() => loadPipelinePolicy(transport), (e: unknown) => e instanceof ControlPlaneError && e.code === 'HTTP_ERROR');
 });

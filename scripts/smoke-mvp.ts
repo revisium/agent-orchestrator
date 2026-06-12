@@ -146,6 +146,8 @@ const appendEvent = async (input: AppendEventInput): Promise<void> => {
 
 const appendCost = async (): Promise<void> => undefined;
 
+const appendAttempt = async (): Promise<void> => undefined;
+
 // runAgent: REAL createRunAgent with throwing claudeCode + stubRunAgent for script dispatch.
 // Cost-safety: in script mode the throwing claudeCode is never reached.
 const throwingClaudeCode = async () => {
@@ -160,6 +162,7 @@ const runStepDeps: RunStepDeps = {
   loadPipelineContext,
   appendEvent,
   appendCost,
+  appendAttempt,
   runAgent,
 };
 
@@ -179,11 +182,22 @@ const awaitHuman = async (
 // cancelRun fake (only called on reject; not exercised in the happy-path smoke).
 const cancelRun = async () => ({ runId: SMOKE_RUN_ID, previousStatus: 'running' as const, status: 'cancelled' as const });
 
+// failRun fake (only called on a terminal step throw; not exercised in the happy-path smoke).
+const failRun = async () => ({ runId: SMOKE_RUN_ID, previousStatus: 'running' as const, status: 'failed' as const });
+
 const loadRunTaskContext = async (_runId: string) => ({
   taskId: SMOKE_TASK_ID,
   title: 'Smoke task',
   base: 'master',
   repoRef: '',
+});
+
+// loadPipelinePolicy fake — safe defaults (no budget limit, 3 review iterations).
+const loadPipelinePolicy = async () => ({
+  maxReviewIterations: 3,
+  maxAttempts: 3,
+  budgetUsd: 0,
+  budgetTokens: 0,
 });
 
 const integrateFn = async (_input: IntegratorInput) => {
@@ -207,7 +221,9 @@ const workflowDeps: DevelopTaskDeps = {
   appendEvent,
   awaitHuman,
   cancelRun,
+  failRun,
   loadRunTaskContext,
+  loadPipelinePolicy,
   integrateFn,
   runStub,
   preflightFn,

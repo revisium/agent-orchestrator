@@ -46,6 +46,15 @@ import { dirname } from 'node:path';
  */
 export const GATE_DEADLINE_EPOCH_MS = 4102444800000; // 2100-01-01T00:00:00Z
 
+/**
+ * Bound on how long DBOS.shutdown() may block before the host detaches anyway (0008 #3).
+ * DBOS.shutdown() drains "pending workflows" — but a workflow PARKED at a human gate
+ * (DBOS.recv) never drains, so app.close() hangs forever after `run start --wait` detaches.
+ * The durable state lives in Postgres and is recovered on the next launch(), so abandoning
+ * the in-memory drain after this bound loses no durability — it only lets the CLI exit 0.
+ */
+export const SHUTDOWN_DRAIN_TIMEOUT_MS = 8_000;
+
 /** Return shape of the dev:ping workflow. */
 export type PingResult = {
   workflowID: string;
@@ -236,11 +245,41 @@ export class DbosService {
 
   /**
    * Shut down DBOS (no-op if never launched — E9).
+   *
+   * 0008 #3 (shutdown-hang): DBOS.shutdown() awaits in-flight workflows to drain. A workflow
+   * PARKED at a human gate (DBOS.recv) never drains, so after `run start --wait` detaches at a
+   * gate, app.close() → this → DBOS.shutdown() blocks indefinitely and the CLI never exits.
+   * We race the drain against SHUTDOWN_DRAIN_TIMEOUT_MS: on timeout we stop awaiting and let the
+   * host detach. Durability is preserved — the parked workflow's state is checkpointed in
+   * Postgres and is recovered on the next launch(); abandoning the in-memory drain loses nothing.
+   *
+   * @param timeoutMs - drain bound (default SHUTDOWN_DRAIN_TIMEOUT_MS); pass 0/Infinity to disable.
    */
-  async shutdown(): Promise<void> {
+  async shutdown(timeoutMs: number = SHUTDOWN_DRAIN_TIMEOUT_MS): Promise<void> {
     if (!this.launched) return;
-    await DBOS.shutdown();
+    // Mark not-launched up front so a timed-out drain cannot leave a re-entrant launch confused.
     this.launched = false;
+    const drain = DBOS.shutdown();
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      await drain;
+      return;
+    }
+    // Swallow a late drain rejection so a post-detach failure never crashes the exiting host.
+    void drain.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race<boolean>([
+      drain.then(() => true).catch(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (!drained) {
+      console.warn(
+        `[dbos] shutdown drain exceeded ${timeoutMs}ms (likely a workflow parked at a human gate); ` +
+          'detaching — durable state is preserved and recovered on next launch.',
+      );
+    }
   }
 
   /**

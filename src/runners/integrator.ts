@@ -15,8 +15,8 @@ import { existsSync, statSync } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { ExecGhFn } from '../poller/pr-readiness.js';
-import { defaultExecGh } from '../poller/pr-readiness.js';
 import { RunService } from '../revisium/run.service.js';
+import { makeExecGh, resolveGhAccount, resolveGhToken } from './gh-identity.js';
 
 // ─── resolveExecutable ────────────────────────────────────────────────────────
 
@@ -446,6 +446,33 @@ function defaultExecGit(args: string[], cwd: string): string {
 }
 
 /**
+ * Build a lazily-pinned execGh (0008 #1). The first gh call resolves the non-secret account
+ * name (default `revisium-io`) → host-resolves its token → returns an ExecGhFn with GH_TOKEN
+ * pinned, so the ambient active-account flip can never break PR creation. Resolution is deferred
+ * to the first call (live integrate only) so non-live host boots never shell out to gh.
+ */
+function makePinnedExecGh(): ExecGhFn {
+  let pinned: ExecGhFn | undefined;
+  return (args: string[]) => {
+    if (!pinned) {
+      const account = resolveGhAccount();
+      const token = resolveGhToken(account);
+      pinned = makeExecGh({ token });
+      if (token) {
+        console.log(`[integrator] gh pinned to account '${account}' (GH_TOKEN, not ambient)`);
+      } else {
+        console.warn(
+          `[integrator] could not resolve a token for gh account '${account}'; ` +
+            'falling back to the ambient gh account — set REVO_GH_ACCOUNT / GH_TOKEN_<ACCOUNT> ' +
+            'or `gh auth login` that account.',
+        );
+      }
+    }
+    return pinned(args);
+  };
+}
+
+/**
  * IntegratorService — @Injectable wrapper over integrate / stubIntegrate / preflightLive.
  * Exposes bound arrow properties so they survive being passed to registerStep unbound.
  * DBOS-SEALED: zero @dbos-inc imports; PipelineService registers these as steps.
@@ -457,7 +484,7 @@ export class IntegratorService {
   constructor(private readonly runService: RunService) {
     this.deps = {
       execGit: defaultExecGit,
-      execGh: defaultExecGh,
+      execGh: makePinnedExecGh(),
       resolveTaskCwd: this.runService.makeResolveTaskCwd(),
     };
   }

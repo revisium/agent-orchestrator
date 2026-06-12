@@ -238,6 +238,11 @@
             "type": "number",
             "default": 0
           },
+          "iteration": {
+            "type": "number",
+            "default": 0,
+            "description": "developer/reviewer rework iteration (0 = first pass)"
+          },
           "status": {
             "type": "string",
             "default": ""
@@ -250,6 +255,11 @@
             "type": "string",
             "default": ""
           },
+          "verdict": {
+            "type": "string",
+            "default": "",
+            "description": "extracted reviewer/agent verdict (PASS|MINOR|MAJOR|BLOCKER|…)"
+          },
           "input_tokens": {
             "type": "number",
             "default": 0
@@ -257,6 +267,23 @@
           "output_tokens": {
             "type": "number",
             "default": 0
+          },
+          "cost_amount": {
+            "type": "number",
+            "default": 0
+          },
+          "currency": {
+            "type": "string",
+            "default": "USD"
+          },
+          "duration_ms": {
+            "type": "number",
+            "default": 0
+          },
+          "output_summary": {
+            "type": "string",
+            "default": "",
+            "description": "Serialized JSON, secret-redacted, capped"
           },
           "lesson": {
             "type": "string",
@@ -439,6 +466,16 @@
             "default": "",
             "description": "Serialized JSON"
           },
+          "timeout_ms": {
+            "type": "number",
+            "default": 0,
+            "description": "per-role agent timeout; 0 = use runner default (0008 #5)"
+          },
+          "permission_mode": {
+            "type": "string",
+            "default": "",
+            "description": "claude --permission-mode; '' = default (0008 #5)"
+          },
           "updated_at": {
             "type": "string",
             "default": ""
@@ -586,7 +623,9 @@
         "runner": "claude-code",
         "allowed_tools": ["Read", "Grep", "Glob", "Write"],
         "scope_rules": "{}",
-        "updated_at": "2026-06-03T00:00:00.000Z"
+        "timeout_ms": 1200000,
+        "permission_mode": "default",
+        "updated_at": "2026-06-11T00:00:00.000Z"
       }
     },
     {
@@ -601,7 +640,9 @@
         "runner": "claude-code",
         "allowed_tools": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
         "scope_rules": "{}",
-        "updated_at": "2026-06-03T00:00:00.000Z"
+        "timeout_ms": 900000,
+        "permission_mode": "default",
+        "updated_at": "2026-06-11T00:00:00.000Z"
       }
     },
     {
@@ -616,7 +657,9 @@
         "runner": "claude-code",
         "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
         "scope_rules": "{}",
-        "updated_at": "2026-06-03T00:00:00.000Z"
+        "timeout_ms": 600000,
+        "permission_mode": "default",
+        "updated_at": "2026-06-11T00:00:00.000Z"
       }
     },
     {
@@ -631,6 +674,8 @@
         "runner": "script",
         "allowed_tools": ["Read", "Bash"],
         "scope_rules": "{}",
+        "timeout_ms": 0,
+        "permission_mode": "default",
         "updated_at": "2026-06-08T00:00:00.000Z"
       }
     },
@@ -646,6 +691,8 @@
         "runner": "script",
         "allowed_tools": [],
         "scope_rules": "{}",
+        "timeout_ms": 0,
+        "permission_mode": "default",
         "updated_at": "2026-06-04T00:00:00.000Z"
       }
     },
@@ -661,6 +708,8 @@
         "runner": "claude-code",
         "allowed_tools": ["Read", "Bash"],
         "scope_rules": "{}",
+        "timeout_ms": 300000,
+        "permission_mode": "default",
         "updated_at": "2026-06-05T00:00:00.000Z"
       }
     },
@@ -705,7 +754,18 @@
         "cost_per_output": 75.0,
         "updated_at": "2026-06-03T00:00:00.000Z"
       }
+    },
+    {
+      "tableId": "routing_policy",
+      "rowId": "pipeline",
+      "data": {
+        "id": "pipeline",
+        "rule": "{\"max_review_iterations\":3,\"max_attempts\":3,\"budget_usd\":0,\"budget_tokens\":0}",
+        "model_level": "standard",
+        "requires_human": false,
+        "updated_at": "2026-06-11T00:00:00.000Z"
+      }
     }
   ],
-  "commitMessage": "Bootstrap control-plane schema and seed roles/model-profiles (plan 0001+0007)"
+  "commitMessage": "Bootstrap control-plane schema and seed roles/model-profiles + pipeline policy (plan 0001+0007+0008)"
 }

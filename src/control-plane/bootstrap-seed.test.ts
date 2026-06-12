@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadRole, loadModelProfile } from './definitions.js';
+import { loadRole, loadModelProfile, loadPipelinePolicy } from './definitions.js';
 import type { ControlPlaneTransport } from './client-transport.js';
 import type { TransportRow } from './client-transport.js';
 
@@ -36,12 +36,24 @@ type SeedRow = {
   data: Record<string, unknown>;
 };
 
+type SeedTable = {
+  id: string;
+  schema: { properties?: Record<string, unknown> };
+};
+
 type SeedConfig = {
   rows: SeedRow[];
+  tables: SeedTable[];
 };
 
 const seed = JSON.parse(readFileSync(seedPath, 'utf8')) as SeedConfig;
 const seedRows: SeedRow[] = seed.rows ?? [];
+const seedTables: SeedTable[] = seed.tables ?? [];
+
+function tableProps(tableId: string): Record<string, unknown> {
+  const t = seedTables.find((x) => x.id === tableId);
+  return t?.schema?.properties ?? {};
+}
 
 // ---------------------------------------------------------------------------
 // In-memory transport: keyed by "tableId/rowId", returns { id, data }
@@ -138,6 +150,43 @@ test('seed: referential integrity — each required role model_level has a match
       profileRowIds.has(expectedLevel),
       `model_profiles row '${expectedLevel}' (for role '${roleName}') is missing from the seed`,
     );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 0008 #5: params-as-data — roles carry timeout_ms/permission_mode; routing_policy
+// holds the pipeline limits; attempts schema carries the observability fields.
+// ---------------------------------------------------------------------------
+test('seed (0008 #5): roles schema declares timeout_ms + permission_mode', () => {
+  const props = tableProps('roles');
+  assert.ok('timeout_ms' in props, 'roles.timeout_ms must be declared');
+  assert.ok('permission_mode' in props, 'roles.permission_mode must be declared');
+});
+
+test('seed (0008 #5): loadRole surfaces per-role timeout_ms + permission_mode', async () => {
+  const architect = await loadRole('architect', transport);
+  assert.equal(architect.timeoutMs, 1200000, 'architect timeout_ms must resolve from the seed');
+  assert.equal(architect.permissionMode, 'default', 'architect permission_mode must resolve from the seed');
+});
+
+test('seed (0008 #5): loadPipelinePolicy resolves the routing_policy "pipeline" row', async () => {
+  const policy = await loadPipelinePolicy(transport);
+  assert.equal(policy.maxReviewIterations, 3, 'max_review_iterations must come from the seed');
+  assert.equal(policy.maxAttempts, 3, 'max_attempts must come from the seed');
+  assert.equal(policy.budgetUsd, 0, 'budget_usd defaults to 0 (unlimited)');
+  assert.equal(policy.budgetTokens, 0, 'budget_tokens defaults to 0 (unlimited)');
+});
+
+test('seed (0008 #5): loadPipelinePolicy falls back to defaults when the row is absent', async () => {
+  const policy = await loadPipelinePolicy(transport, 'does-not-exist');
+  assert.equal(policy.maxReviewIterations, 3);
+  assert.equal(policy.maxAttempts, 3);
+});
+
+test('seed (0008 #4): attempts schema declares the observability fields', () => {
+  const props = tableProps('attempts');
+  for (const field of ['iteration', 'verdict', 'cost_amount', 'duration_ms', 'output_summary']) {
+    assert.ok(field in props, `attempts.${field} must be declared for observability`);
   }
 });
 

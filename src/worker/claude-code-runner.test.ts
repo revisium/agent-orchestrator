@@ -104,6 +104,71 @@ test('claude-code runner: maps role.allowedTools to the allowed-tools flag', asy
   assert.equal(req?.args[idx + 1], 'Edit,Write', 'tools joined and never widened beyond the list');
 });
 
+// ─── 0008 #5: per-role timeout / permission_mode + model params ───────────────
+
+test('claude-code runner (0008 #5): uses role.permissionMode (not the hardcoded default)', async () => {
+  const captured: ExecRequest[] = [];
+  const stdout = transport(agentBlock({ output: 'ok', nextSteps: [], needsHuman: false }));
+  const runner = createClaudeCodeRunner({ executor: fakeExecutor(ok(stdout), captured), resolveCwd: async () => '/w', timeoutMs: 5_000 });
+  await runner({
+    role: makeRole('developer', { permissionMode: 'acceptEdits' }),
+    profile: PROFILE,
+    context: 'ctx',
+    attemptId: ATTEMPT_ID,
+    step: BASE_STEP,
+  });
+  const req = captured[0];
+  const idx = req?.args.indexOf('--permission-mode') ?? -1;
+  assert.equal(req?.args[idx + 1], 'acceptEdits', 'permission mode must come from the role');
+});
+
+test('claude-code runner (0008 #5): defaults permission mode to "default" when role omits it', async () => {
+  const captured: ExecRequest[] = [];
+  const stdout = transport(agentBlock({ output: 'ok', nextSteps: [], needsHuman: false }));
+  await run(fakeExecutor(ok(stdout), captured));
+  const req = captured[0];
+  const idx = req?.args.indexOf('--permission-mode') ?? -1;
+  assert.equal(req?.args[idx + 1], 'default');
+});
+
+test('claude-code runner (0008 #5): role.timeoutMs overrides the runner default', async () => {
+  const captured: ExecRequest[] = [];
+  const stdout = transport(agentBlock({ output: 'ok', nextSteps: [], needsHuman: false }));
+  const runner = createClaudeCodeRunner({ executor: fakeExecutor(ok(stdout), captured), resolveCwd: async () => '/w', timeoutMs: 5_000 });
+  await runner({
+    role: makeRole('architect', { timeoutMs: 1_234_567 }),
+    profile: PROFILE,
+    context: 'ctx',
+    attemptId: ATTEMPT_ID,
+    step: BASE_STEP,
+  });
+  assert.equal(captured[0]?.timeoutMs, 1_234_567, 'per-role timeout must win over the runner default');
+});
+
+test('claude-code runner (0008 #5): model_profiles.params.maxTurns maps to --max-turns', async () => {
+  const captured: ExecRequest[] = [];
+  const stdout = transport(agentBlock({ output: 'ok', nextSteps: [], needsHuman: false }));
+  const runner = createClaudeCodeRunner({ executor: fakeExecutor(ok(stdout), captured), resolveCwd: async () => '/w', timeoutMs: 5_000 });
+  await runner({
+    role: makeRole('developer'),
+    profile: { ...PROFILE, params: { maxTurns: 12 } },
+    context: 'ctx',
+    attemptId: ATTEMPT_ID,
+    step: BASE_STEP,
+  });
+  const req = captured[0];
+  const idx = req?.args.indexOf('--max-turns') ?? -1;
+  assert.ok(idx >= 0, '--max-turns flag present when params.maxTurns is set');
+  assert.equal(req?.args[idx + 1], '12');
+});
+
+test('claude-code runner (0008 #5): no --max-turns flag when params is empty', async () => {
+  const captured: ExecRequest[] = [];
+  const stdout = transport(agentBlock({ output: 'ok', nextSteps: [], needsHuman: false }));
+  await run(fakeExecutor(ok(stdout), captured));
+  assert.ok(!captured[0]?.args.includes('--max-turns'), 'empty params → no --max-turns');
+});
+
 // ─── prompt contains the contract (regression guard) ──────────────────────────
 
 test('claude-code runner: appends REVO_RESULT_CONTRACT to every prompt', async () => {

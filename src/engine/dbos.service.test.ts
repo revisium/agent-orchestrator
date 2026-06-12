@@ -147,6 +147,47 @@ test('DbosService: shutdown() after launch() calls DBOS.shutdown()', async () =>
   }
 });
 
+test('DbosService: shutdown() detaches when DBOS.shutdown() hangs past the drain timeout (0008 #3)', async () => {
+  // Simulate a workflow parked at a human gate: DBOS.shutdown() never resolves.
+  let drainSettled = false;
+  patchDbos({ shutdown: () => new Promise<void>(() => { /* never resolves */ }).then(() => { drainSettled = true; }) });
+  const origWarn = console.warn;
+  let warned = '';
+  console.warn = (msg?: unknown) => { warned = String(msg); };
+  try {
+    const { DbosService } = await import('./dbos.service.js');
+    const svc = new DbosService();
+    svc.setConfig('postgresql://revisium:password@localhost:15440/dbos');
+    await svc.launch();
+    const started = Date.now();
+    // Pass a short bound so the test does not wait the full default.
+    await svc.shutdown(50);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 2000, `shutdown must detach quickly, took ${elapsed}ms`);
+    assert.equal(drainSettled, false, 'the hung drain must NOT have resolved');
+    assert.match(warned, /drain exceeded/, 'must warn that it detached without draining');
+  } finally {
+    console.warn = origWarn;
+    restoreDbos();
+  }
+});
+
+test('DbosService: shutdown() is a no-op on the second call after a detach (0008 #3)', async () => {
+  let shutdownCallCount = 0;
+  patchDbos({ shutdown: async () => { shutdownCallCount += 1; } });
+  try {
+    const { DbosService } = await import('./dbos.service.js');
+    const svc = new DbosService();
+    svc.setConfig('postgresql://revisium:password@localhost:15440/dbos');
+    await svc.launch();
+    await svc.shutdown();
+    await svc.shutdown();
+    assert.equal(shutdownCallCount, 1, 'DBOS.shutdown() must be called exactly once');
+  } finally {
+    restoreDbos();
+  }
+});
+
 // ── 0004 G9: signal reorder assertion + awaitDecision deadline ────────────────
 
 test('DbosService.signal: wrapper canonical order (workflowId,topic,payload,idemKey) reorders to raw DBOS.send(workflowId,payload,topic,idemKey) (G9)', async () => {

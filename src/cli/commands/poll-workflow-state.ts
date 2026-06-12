@@ -47,6 +47,16 @@ export type DbosStatusProvider = {
   getWorkflowStatus: (id: string) => Promise<{ status: string } | null>;
 };
 
+/** DBOS terminal statuses that mean the workflow FAILED (vs. SUCCESS / CANCELLED). */
+const FAILURE_STATUSES = new Set(['ERROR', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED']);
+
+/**
+ * RunFailureReader — optional reader so --wait can SHOW the run_failed reason instead of a bare
+ * "status: ERROR" (0008 #2). Returns the Revisium run-row status + the persisted failure reason.
+ * Injected (not imported) to keep this helper free of a RunService dependency.
+ */
+export type RunFailureReader = (runId: string) => Promise<{ runStatus?: string; reason?: string } | null>;
+
 /**
  * PollOpts — options for pollWorkflowState (0006).
  *
@@ -58,6 +68,8 @@ export type PollOpts = {
   wait?: boolean;
   maxAttempts?: number;
   intervalMs?: number;
+  /** Optional reader to surface the run_failed reason on a FAILURE terminal status (0008 #2). */
+  readFailure?: RunFailureReader;
 };
 
 /**
@@ -74,14 +86,35 @@ function abortableSleep(intervalMs: number, earlyResolveRef: { resolve?: () => v
 /**
  * checkTerminalStatus — check if the workflow has reached a terminal DBOS status.
  * Prints the status line and returns true if terminal so the caller can stop.
+ *
+ * 0008 #2: on a FAILURE terminal status (ERROR / MAX_RECOVERY_ATTEMPTS_EXCEEDED), read the
+ * Revisium run-row failure reason (if a reader is supplied) and surface it as a clear
+ * "run failed" line — never a silent sleep→ERROR with no explanation.
  */
-async function checkTerminalStatus(runId: string, dbosService: DbosStatusProvider): Promise<boolean> {
+async function checkTerminalStatus(
+  runId: string,
+  dbosService: DbosStatusProvider,
+  readFailure?: RunFailureReader,
+): Promise<boolean> {
   const wfStatus = await dbosService.getWorkflowStatus(runId);
-  if (wfStatus && TERMINAL_STATUSES.has(wfStatus.status)) {
-    console.log(`status:   ${wfStatus.status}`);
-    return true;
+  if (!wfStatus || !TERMINAL_STATUSES.has(wfStatus.status)) {
+    return false;
   }
-  return false;
+  console.log(`status:   ${wfStatus.status}`);
+  if (FAILURE_STATUSES.has(wfStatus.status) && readFailure) {
+    try {
+      const failure = await readFailure(runId);
+      if (failure?.reason) {
+        console.log(`run failed: ${failure.reason}`);
+      } else if (failure?.runStatus && failure.runStatus !== 'failed') {
+        // DBOS says failure but the run-row was never patched — surface the integrity gap.
+        console.log(`note:     DBOS=${wfStatus.status} but run-row status=${failure.runStatus} (no run_failed reason recorded)`);
+      }
+    } catch {
+      // A failure-reason read should never mask the terminal signal — ignore and stop anyway.
+    }
+  }
+  return true;
 }
 
 /**
@@ -146,7 +179,7 @@ export async function pollWorkflowState(
         return;
       }
 
-      if (await checkTerminalStatus(runId, dbosService)) {
+      if (await checkTerminalStatus(runId, dbosService, opts.readFailure)) {
         return;
       }
 

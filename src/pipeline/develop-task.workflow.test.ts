@@ -38,13 +38,14 @@ import {
 import { stubRunAgent } from '../worker/stub-runner.js';
 import { createRunAgent } from '../worker/runner-dispatch.js';
 import type { AttemptResult, RunAgent } from '../worker/runner.js';
-import type { Role, ModelProfile } from '../control-plane/definitions.js';
+import type { Role, ModelProfile, PipelinePolicy } from '../control-plane/definitions.js';
 import type { Step } from '../control-plane/steps.js';
 import type { ControlPlaneDataAccess } from '../control-plane/data-access.js';
 import { ControlPlaneError } from '../control-plane/errors.js';
-import type { AppendEventInput, AppendCostInput } from '../run/append-event.js';
+import type { AppendEventInput, AppendCostInput, AppendAttemptInput } from '../run/append-event.js';
 import type { Decision } from './await-human.js';
 import type { CancelRunResult } from '../run/cancel-run.js';
+import type { FailRunResult } from '../run/fail-run.js';
 import type { IntegratorInput, IntegratorOutput, IntegratorBlocked } from '../runners/integrator.js';
 import { stubIntegrate } from '../runners/integrator.js';
 
@@ -141,8 +142,10 @@ type Harness = {
   loadRoleArgs: string[];
   appendEventArgs: Array<{ stepKey: string; type: string }>;
   appendEventInputs: AppendEventInput[];
+  appendAttemptInputs: AppendAttemptInput[];
   cancelRunArgs: string[];
   cancelRunOpts: Array<{ actor?: string; source?: string } | undefined>;
+  failRunArgs: Array<{ runId: string; reason: string }>;
   integrateCallCount: number;
   stubCallCount: number;
   preflightCallCount: number;
@@ -168,6 +171,7 @@ function buildDeps(opts: {
   awaitHumanResults?: Partial<Record<'plan' | 'merge', Decision>>;
   preflightResult?: { ok: true } | { needsHuman: true; lesson: string };
   integrateResult?: IntegratorOutput | IntegratorBlocked;
+  policy?: PipelinePolicy;
 }): {
   deps: RunStepDeps;
   workflowDeps: DevelopTaskDeps;
@@ -178,8 +182,10 @@ function buildDeps(opts: {
     loadRoleArgs: [],
     appendEventArgs: [],
     appendEventInputs: [],
+    appendAttemptInputs: [],
     cancelRunArgs: [],
     cancelRunOpts: [],
+    failRunArgs: [],
     integrateCallCount: 0,
     stubCallCount: 0,
     preflightCallCount: 0,
@@ -216,6 +222,10 @@ function buildDeps(opts: {
 
   const appendCost = async (_input: AppendCostInput): Promise<void> => undefined;
 
+  const appendAttempt = async (input: AppendAttemptInput): Promise<void> => {
+    harness.appendAttemptInputs.push(input);
+  };
+
   // Build the real runAgent (same dispatch seam as production).
   // If reviewerResults are provided, wrap the runAgent to inject controlled verdicts for `reviewer` role.
   let reviewerCallCount = 0;
@@ -247,6 +257,7 @@ function buildDeps(opts: {
     loadPipelineContext,
     appendEvent,
     appendCost,
+    appendAttempt,
     runAgent,
   };
 
@@ -268,6 +279,12 @@ function buildDeps(opts: {
     return { runId, previousStatus: 'running', status: 'cancelled' };
   };
 
+  // failRun fake — records the runId + reason (0008 #2: terminal-failure surfacing).
+  const failRun = async (runId: string, reason: string): Promise<FailRunResult | null> => {
+    harness.failRunArgs.push({ runId, reason });
+    return { runId, previousStatus: 'running', status: 'failed' };
+  };
+
   // loadRunTaskContext fake — returns a minimal context.
   const loadRunTaskContext = async (_runId: string) => ({
     taskId: 'task-001',
@@ -275,6 +292,15 @@ function buildDeps(opts: {
     base: 'master',
     repoRef: '',
   });
+
+  // loadPipelinePolicy fake — defaults to the safe defaults; overridable for budget/iteration tests.
+  const policy = opts.policy ?? {
+    maxReviewIterations: 3,
+    maxAttempts: 3,
+    budgetUsd: 0,
+    budgetTokens: 0,
+  };
+  const loadPipelinePolicy = async () => policy;
 
   // preflightFn fake — defaults to ok:true; can be overridden.
   const preflightResult = opts.preflightResult ?? { ok: true as const };
@@ -305,7 +331,9 @@ function buildDeps(opts: {
     appendEvent,
     awaitHuman,
     cancelRun,
+    failRun,
     loadRunTaskContext,
+    loadPipelinePolicy,
     integrateFn,
     runStub,
     preflightFn,
@@ -573,6 +601,111 @@ test('T4b (B9): runnerMode=live + claude-code seeded roles → throws RUNNER_NOT
       return true;
     },
   );
+});
+
+// ─── 0008 #4: per-attempt observability rows ─────────────────────────────────
+
+test('0008 #4: every step writes a per-attempt row with verdict + iteration + status', async () => {
+  const runId = 'run-attempts';
+  const { deps, workflowDeps, harness } = buildDeps({
+    runId,
+    reviewerResults: [{ verdict: 'BLOCKER' }, { verdict: 'PASS' }],
+  });
+  const developTaskImpl = makeDevelopTask(makeRunStep(deps), workflowDeps);
+  await developTaskImpl(runId, { runnerMode: 'script' as RunnerMode });
+
+  // architect, developer, reviewer, developer#1, reviewer#1 = 5 step attempts.
+  const attempts = harness.appendAttemptInputs;
+  assert.equal(attempts.length, 5, `expected 5 attempt rows, got ${attempts.length}`);
+
+  // iteration derived from the stepKey: first-pass = 0, rework = 1.
+  assert.deepEqual(attempts.map((a) => a.iteration), [0, 0, 0, 1, 1], 'iterations must track the rework loop');
+  // attempt_no is iteration + 1.
+  assert.deepEqual(attempts.map((a) => a.attemptNo), [1, 1, 1, 2, 2], 'attemptNo must be iteration+1');
+
+  // every attempt carries a verdict + a deterministic attemptId + a succeeded status.
+  for (const a of attempts) {
+    assert.ok(a.attemptId.startsWith('attempt_'), `attemptId must be deterministic: ${a.attemptId}`);
+    assert.equal(a.status, 'succeeded');
+    assert.ok(a.verdict.length > 0, 'verdict must be extracted');
+    assert.ok(a.durationMs >= 0, 'durationMs must be non-negative');
+  }
+});
+
+// ─── 0008 #5: pipeline limits + budget as DATA ───────────────────────────────
+
+test('0008 #5: maxReviewIterations comes from policy (cap=1 stops the loop after one rework)', async () => {
+  const runId = 'run-policy-iter';
+  const { deps, workflowDeps, harness } = buildDeps({
+    runId,
+    reviewerResults: [{ verdict: 'BLOCKER' }, { verdict: 'BLOCKER' }, { verdict: 'BLOCKER' }],
+    policy: { maxReviewIterations: 1, maxAttempts: 3, budgetUsd: 0, budgetTokens: 0 },
+  });
+  const developTaskImpl = makeDevelopTask(makeRunStep(deps), workflowDeps);
+  const result = await developTaskImpl(runId, { runnerMode: 'script' as RunnerMode });
+  assert.equal(result.iterations, 1, 'loop must honor the policy cap of 1');
+  assert.equal(result.blocked, true, 'still-blocking after the cap → blocked');
+  const blocked = harness.appendEventArgs.find((e) => e.type === 'pipeline_blocked');
+  assert.ok(blocked, 'pipeline_blocked event must be written when the cap is hit');
+});
+
+test('0008 #5: run-level budget hard-stop blocks the run (reason=budget)', async () => {
+  const runId = 'run-budget';
+  // stub runner reports a per-step cost; set a tiny USD budget so the first step trips it.
+  const { deps, workflowDeps, harness } = buildDeps({
+    runId,
+    policy: { maxReviewIterations: 3, maxAttempts: 3, budgetUsd: 0.0001, budgetTokens: 0 },
+  });
+  // Wrap runAgent so each step reports a cost above the budget.
+  const baseRunAgent = deps.runAgent;
+  deps.runAgent = async (args) => {
+    const r = await baseRunAgent(args);
+    return { ...r, costs: [{ modelProfile: 'standard', inputTokens: 10, outputTokens: 10, costAmount: 1, currency: 'USD' }] };
+  };
+  const developTaskImpl = makeDevelopTask(makeRunStep(deps), workflowDeps);
+  const result = await developTaskImpl(runId, { runnerMode: 'script' as RunnerMode });
+  assert.equal(result.blocked, true, 'over-budget run must be blocked');
+  assert.equal(result.verdict, 'BLOCKED');
+  const budgetEvt = harness.appendEventInputs.find(
+    (e) => e.type === 'pipeline_blocked' && (e.payload as Record<string, unknown>).reason === 'budget',
+  );
+  assert.ok(budgetEvt, 'pipeline_blocked with reason=budget must be written');
+  // The architect step alone (cost 1 > 0.0001) trips the budget — integrator never runs.
+  assert.equal(harness.stubCallCount, 0, 'integrator must not run after a budget block');
+});
+
+// ─── 0008 #2: terminal step failure → failRun + rethrow ──────────────────────
+
+test('0008 #2: a step throw marks the run failed (failRun) AND re-throws so DBOS records ERROR', async () => {
+  const runId = 'run-fail';
+  // Live mode + claude-code roles → the architect step calls throwingClaudeCode → throws.
+  const seededRoles = new Map<string, Role>([
+    ['architect', makeRole('architect', 'claude-code')],
+    ['developer', makeRole('developer', 'claude-code')],
+    ['reviewer', makeRole('reviewer', 'claude-code')],
+    ['integrator', makeRole('integrator', 'claude-code')],
+  ]);
+  const { deps, workflowDeps, harness } = buildDeps({ runId, roles: seededRoles });
+  const developTaskImpl = makeDevelopTask(makeRunStep(deps), workflowDeps);
+
+  // Must re-throw (DBOS=progress: the workflow is still ERROR) ...
+  await assert.rejects(
+    () => developTaskImpl(runId, { runnerMode: 'live' as RunnerMode }),
+    /RUNNER_NOT_IMPLEMENTED/,
+  );
+  // ... but FIRST mark the Revisium run-row failed with the reason (run-row stops lying).
+  assert.equal(harness.failRunArgs.length, 1, 'failRun must be called exactly once');
+  assert.equal(harness.failRunArgs[0]?.runId, runId);
+  assert.match(harness.failRunArgs[0]?.reason ?? '', /RUNNER_NOT_IMPLEMENTED/);
+});
+
+test('0008 #2: a successful run does NOT call failRun', async () => {
+  const runId = 'run-ok';
+  const { deps, workflowDeps, harness } = buildDeps({ runId });
+  const developTaskImpl = makeDevelopTask(makeRunStep(deps), workflowDeps);
+  const result = await developTaskImpl(runId, { runnerMode: 'script' as RunnerMode });
+  assert.equal(result.blocked, false);
+  assert.equal(harness.failRunArgs.length, 0, 'failRun must NOT be called on success');
 });
 
 // ─── B7: modelProfile from role (not hardcoded) ───────────────────────────────
@@ -1148,6 +1281,12 @@ test('PipelineService wiring: REAL registered workflow drives script-mode and li
     // can dispatch correctly (reviewer → verdict:PASS, etc.).
     loadRole: async (name: string): Promise<Role> => ({ ...fakeRole, name: name as Role['name'] }),
     loadModelProfile: async (_level: string): Promise<ModelProfile> => fakeProfile,
+    loadPipelinePolicy: async (): Promise<PipelinePolicy> => ({
+      maxReviewIterations: 3,
+      maxAttempts: 3,
+      budgetUsd: 0,
+      budgetTokens: 0,
+    }),
   };
   const fakeRunService = {
     loadPipelineContext: async (
@@ -1159,7 +1298,9 @@ test('PipelineService wiring: REAL registered workflow drives script-mode and li
     ) => ({ da: fakeDa, step: { ...fakeStep, id: `pstep_${stepKey}`, taskId: 'task-w1', runId: rId, role, input: stepInput, modelProfile } }),
     appendEvent: async (input: AppendEventInput) => { appendedEvents.push(input); },
     appendCost: async () => undefined,
+    appendAttempt: async () => undefined,
     cancelRun: async () => null,
+    failRun: async () => null,
     loadRunTaskContext: async (_rId: string) => ({
       taskId: 'task-w1',
       title: 'Wiring test',

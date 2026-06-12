@@ -9,7 +9,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendRunEvent, appendRunCost } from './append-event.js';
+import { appendRunEvent, appendRunCost, appendRunAttempt } from './append-event.js';
 import type { ControlPlaneDataAccess } from '../control-plane/data-access.js';
 import { ControlPlaneError } from '../control-plane/errors.js';
 
@@ -191,4 +191,65 @@ test('appendRunCost: different index produces different costId', async () => {
   await appendRunCost(da1, { ...base, index: 0 });
   await appendRunCost(da2, { ...base, index: 1 });
   assert.notEqual(rows1[0]?.rowId, rows2[0]?.rowId);
+});
+
+// ─── appendRunAttempt (0008 #4) ──────────────────────────────────────────────
+
+test('appendRunAttempt: persists the attempt with attemptId as the row id (deterministic)', async () => {
+  const { da, rows } = makeFakeDa();
+  await appendRunAttempt(da, {
+    runId: 'run-1',
+    stepId: 'pstep_reviewer',
+    attemptId: 'attempt_deadbeef',
+    attemptNo: 2,
+    iteration: 1,
+    status: 'succeeded',
+    modelProfile: 'standard',
+    verdict: 'PASS',
+    inputTokens: 100,
+    outputTokens: 50,
+    costAmount: 0.01,
+    durationMs: 1234,
+    output: { verdict: 'PASS' },
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.rowId, 'attempt_deadbeef');
+  assert.equal(rows[0]?.data.verdict, 'PASS');
+  assert.equal(rows[0]?.data.iteration, 1);
+  assert.equal(rows[0]?.data.duration_ms, 1234);
+  assert.equal(rows[0]?.data.output_summary, '{"verdict":"PASS"}');
+});
+
+test('appendRunAttempt: redacts secret-shaped output keys + token shapes before persisting', async () => {
+  const { da, rows } = makeFakeDa();
+  await appendRunAttempt(da, {
+    runId: 'run-1',
+    stepId: 'pstep_x',
+    attemptId: 'attempt_x',
+    attemptNo: 1,
+    iteration: 0,
+    status: 'succeeded',
+    modelProfile: 'standard',
+    verdict: 'PASS',
+    inputTokens: 0,
+    outputTokens: 0,
+    costAmount: 0,
+    durationMs: 1,
+    output: { token: 'gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345', note: 'ok' },
+    error: 'leaked gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
+  });
+  const summary = String(rows[0]?.data.output_summary);
+  assert.ok(!summary.includes('gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345'), 'token-shaped value must be redacted');
+  assert.ok(summary.includes('[REDACTED]'), 'secret key redacted');
+  assert.ok(!String(rows[0]?.data.error).includes('gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345'), 'error token redacted');
+});
+
+test('appendRunAttempt: ROW_CONFLICT on replay is a silent no-op', async () => {
+  const { da } = makeFakeDa({ throwConflict: true });
+  await appendRunAttempt(da, {
+    runId: 'run-1', stepId: 's', attemptId: 'attempt_y', attemptNo: 1, iteration: 0,
+    status: 'succeeded', modelProfile: 'standard', verdict: 'PASS',
+    inputTokens: 0, outputTokens: 0, costAmount: 0, durationMs: 0, output: null,
+  });
+  // No throw = pass (idempotent replay).
 });

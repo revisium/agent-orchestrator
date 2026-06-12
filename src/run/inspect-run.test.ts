@@ -390,7 +390,7 @@ test('formatRunDetail timestamp has no stray dot', () => {
 
 test('formatEventList produces header, one row per event, and count summary', () => {
   const events = [
-    { eventId: 'event_20260601T000000000Z_run_ab12cd34_created', type: 'run_created', actor: 'cli', createdAt: '2026-06-01T00:00:00.000Z', taskId: 'task-a', stepId: 'step-a' },
+    { eventId: 'event_20260601T000000000Z_run_ab12cd34_created', type: 'run_created', actor: 'cli', createdAt: '2026-06-01T00:00:00.000Z', taskId: 'task-a', stepId: 'step-a', payload: null },
   ];
   const output = formatEventList(events);
   assert.ok(output.includes('EVENT'), 'has header');
@@ -400,10 +400,66 @@ test('formatEventList produces header, one row per event, and count summary', ()
 });
 
 test('formatEventList timestamp has no stray dot', () => {
-  const events = [{ eventId: 'event-1', type: 'run_created', actor: 'cli', createdAt: '2026-06-01T00:00:00.000Z', taskId: 'task-a', stepId: 'step-a' }];
+  const events = [{ eventId: 'event-1', type: 'run_created', actor: 'cli', createdAt: '2026-06-01T00:00:00.000Z', taskId: 'task-a', stepId: 'step-a', payload: null }];
   const output = formatEventList(events);
   assert.ok(!output.includes('.Z'), 'no stray dot before Z');
   assert.ok(output.includes('2026-06-01T00:00:00Z'), 'correct timestamp format');
+});
+
+// ─────────────────────── 0008 #4 observability ───────────────────────
+
+test('formatEventListVerbose expands the payload (output/verdict/reason)', async () => {
+  const { formatEventListVerbose } = await import('./inspect-run.js');
+  const events = [
+    {
+      eventId: 'event_x',
+      type: 'step_succeeded',
+      actor: 'orchestrator',
+      createdAt: '2026-06-11T00:00:00.000Z',
+      taskId: 'task-a',
+      stepId: 'step-a',
+      payload: { output: { verdict: 'PASS' }, role: 'reviewer' },
+    },
+  ];
+  const out = formatEventListVerbose(events);
+  assert.ok(out.includes('step_succeeded'), 'has event type');
+  assert.ok(out.includes('"verdict": "PASS"'), 'expands the payload JSON');
+  assert.ok(out.includes('(1 event)'), 'has summary');
+});
+
+test('formatAttemptList renders per-attempt verdict/model/tokens/cost/duration', async () => {
+  const { formatAttemptList } = await import('./inspect-run.js');
+  const attempts = [
+    {
+      attemptId: 'attempt_abc',
+      stepId: 'pstep_reviewer',
+      iteration: 1,
+      status: 'succeeded',
+      verdict: 'PASS',
+      modelProfile: 'standard',
+      inputTokens: 1200,
+      outputTokens: 340,
+      costAmount: 0.0123,
+      durationMs: 4567,
+      outputSummary: '{"verdict":"PASS"}',
+      lesson: '',
+      error: '',
+      startedAt: '2026-06-11T00:00:00.000Z',
+    },
+  ];
+  const out = formatAttemptList(attempts);
+  assert.ok(out.includes('attempt_abc'), 'has attempt id');
+  assert.ok(out.includes('verdict=PASS'), 'has verdict');
+  assert.ok(out.includes('model=standard'), 'has model');
+  assert.ok(out.includes('1200in/340out'), 'has tokens');
+  assert.ok(out.includes('4567ms'), 'has duration');
+  assert.ok(out.includes('iter=1'), 'has iteration');
+  assert.ok(out.includes('(1 attempt)'), 'has summary');
+});
+
+test('formatAttemptList: empty list', async () => {
+  const { formatAttemptList } = await import('./inspect-run.js');
+  assert.equal(formatAttemptList([]), '(0 attempts)');
 });
 
 // ─────────────────────── cap warnings ───────────────────────
