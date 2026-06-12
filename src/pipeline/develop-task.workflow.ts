@@ -68,29 +68,55 @@ export type DevelopTaskOpts = {
  * M2 (COMMITTED): fail-closed — missing/unknown verdict returns 'BLOCKER'.
  * Maps the seeded reviewer prompt vocabulary: APPROVE→PASS, REQUEST_CHANGES→MAJOR.
  * Explicit BLOCKER passes through. PASS and MINOR proceed.
+ *
+ * 0008 dogfood fix: a real claude reviewer emits its verdict as a FREE-TEXT string that BEGINS
+ * with the verdict word (e.g. `"APPROVE — all gates pass…"`, `"REQUEST_CHANGES: …"`), not as a
+ * structured `{ verdict: … }` object. The original parser only read `output.verdict` and
+ * fail-closed every string output to BLOCKER — so genuine APPROVEs looped to the cap and the
+ * pipeline never reached the integrator. We now also recognize the leading token of a string
+ * output. Fail-closed is preserved: an object with no known verdict, or a string with no
+ * recognized LEADING token, still returns BLOCKER (don't integrate ambiguously-reviewed code).
  */
-export function verdictOf(result: AttemptResult): string {
-  const output = result.output;
-  if (output === null || output === undefined || typeof output !== 'object') {
-    return 'BLOCKER'; // fail-closed: no output → treat as blocking
-  }
-  const raw = (output as Record<string, unknown>).verdict;
+function mapVerdictToken(raw: unknown): string | null {
   switch (raw) {
     case 'PASS':
+    case 'APPROVE': // seeded reviewer prompt vocabulary mapping
       return 'PASS';
     case 'MINOR':
       return 'MINOR';
     case 'MAJOR':
+    case 'REQUEST_CHANGES': // seeded reviewer prompt vocabulary mapping
       return 'MAJOR';
     case 'BLOCKER':
       return 'BLOCKER';
-    case 'APPROVE':
-      return 'PASS'; // seeded reviewer prompt vocabulary mapping
-    case 'REQUEST_CHANGES':
-      return 'MAJOR'; // seeded reviewer prompt vocabulary mapping
     default:
-      return 'BLOCKER'; // fail-closed: unknown verdict → treat as blocking
+      return null; // unrecognized
   }
+}
+
+/**
+ * Extract a verdict from the LEADING token of a free-text reviewer string.
+ * Anchored at the start (after trimming) so a verdict word merely *mentioned* mid-sentence
+ * (e.g. "REQUEST_CHANGES — the APPROVE criteria are unmet") resolves by the real leading verdict,
+ * not an incidental match. Returns null when the string does not start with a known verdict.
+ */
+function verdictFromText(text: string): string | null {
+  const m = /^(APPROVE|REQUEST_CHANGES|BLOCKER|MAJOR|MINOR|PASS)\b/.exec(text.trimStart().toUpperCase());
+  return m ? mapVerdictToken(m[1]) : null;
+}
+
+export function verdictOf(result: AttemptResult): string {
+  const output = result.output;
+  // Structured form: { verdict: "…" }.
+  if (output !== null && typeof output === 'object') {
+    return mapVerdictToken((output as Record<string, unknown>).verdict) ?? 'BLOCKER';
+  }
+  // Free-text form: reviewer emitted a string whose leading token is the verdict.
+  if (typeof output === 'string') {
+    return verdictFromText(output) ?? 'BLOCKER';
+  }
+  // Missing/non-parseable output → fail-closed.
+  return 'BLOCKER';
 }
 
 function isBlocking(verdict: string): boolean {
