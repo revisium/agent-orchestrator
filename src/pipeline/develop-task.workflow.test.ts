@@ -674,6 +674,26 @@ test('0008 #5: run-level budget hard-stop blocks the run (reason=budget)', async
   assert.equal(harness.stubCallCount, 0, 'integrator must not run after a budget block');
 });
 
+test('0008 #4: a failing attempt-row write does NOT fail the step (observability is non-fatal)', async () => {
+  const runId = 'run-attempt-nonfatal';
+  const { deps } = buildDeps({ runId });
+  // Simulate a control-plane whose attempts schema predates 0008 (additionalProperties:false).
+  deps.appendAttempt = async () => {
+    throw new Error('VALIDATION_FAILURE: attempts has no property "verdict"');
+  };
+  const origWarn = console.warn;
+  let warned = '';
+  console.warn = (msg?: unknown) => { warned = String(msg); };
+  try {
+    const runStepImpl = makeRunStep(deps);
+    const result = await runStepImpl(runId, 'architect', 'architect', { phase: 'plan' }, 'script' as RunnerMode);
+    assert.ok(result, 'step must still return a result despite the attempt-write failure');
+    assert.match(warned, /attempt-row write failed/, 'must warn about the non-fatal write failure');
+  } finally {
+    console.warn = origWarn;
+  }
+});
+
 // ─── 0008 #2: terminal step failure → failRun + rethrow ──────────────────────
 
 test('0008 #2: a step throw marks the run failed (failRun) AND re-throws so DBOS records ERROR', async () => {

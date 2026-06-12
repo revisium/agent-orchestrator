@@ -250,25 +250,35 @@ export function makeRunStep(deps: RunStepDeps) {
 
     // 10. Persist the per-attempt observability row (0008 #4). Aggregate tokens/cost from the
     //     cost records; extract the verdict; redact secrets on store. Idempotent by attemptId.
+    //     NON-FATAL: the attempts row is pure observability — a write failure (e.g. a control-plane
+    //     whose attempts schema predates 0008's fields, additionalProperties:false → VALIDATION_FAILURE)
+    //     must NEVER fail an otherwise-successful agent step. Log and continue.
     const inputTokens = result.costs.reduce((sum, c) => sum + (c?.inputTokens ?? 0), 0);
     const outputTokens = result.costs.reduce((sum, c) => sum + (c?.outputTokens ?? 0), 0);
     const costAmount = result.costs.reduce((sum, c) => sum + (c?.costAmount ?? 0), 0);
-    await appendAttempt({
-      runId,
-      stepId: step.id,
-      attemptId,
-      attemptNo: iterationOf(stepKey) + 1,
-      iteration: iterationOf(stepKey),
-      status: result.needsHuman ? 'awaiting_approval' : 'succeeded',
-      modelProfile: step.modelProfile,
-      verdict: verdictOf(result),
-      inputTokens,
-      outputTokens,
-      costAmount,
-      durationMs,
-      output: result.output,
-      lesson: result.lesson,
-    });
+    try {
+      await appendAttempt({
+        runId,
+        stepId: step.id,
+        attemptId,
+        attemptNo: iterationOf(stepKey) + 1,
+        iteration: iterationOf(stepKey),
+        status: result.needsHuman ? 'awaiting_approval' : 'succeeded',
+        modelProfile: step.modelProfile,
+        verdict: verdictOf(result),
+        inputTokens,
+        outputTokens,
+        costAmount,
+        durationMs,
+        output: result.output,
+        lesson: result.lesson,
+      });
+    } catch (err) {
+      console.warn(
+        `[pipeline] attempt-row write failed for ${stepKey} (${attemptId}) — observability only, step still succeeds. ` +
+          `If this is a schema-drift error, migrate the control-plane attempts table to the 0008 fields. ${String(err)}`,
+      );
+    }
 
     return result;
   };
