@@ -15,6 +15,7 @@ Documentation for the local AI-agent orchestrator built on Revisium. Repo-local 
 
 | Doc | Area |
 | --- | --- |
+| [vision](./vision.md) | product vision: pains → capabilities, stages, differentiators, glossary |
 | [architecture-overview](./architecture-overview.md) | invariants, layers (host + DBOS + Revisium) |
 | [adr/0001-execution-engine-and-host](./adr/0001-execution-engine-and-host.md) | DBOS + NestJS decision record |
 | [control-plane-schema](./control-plane-schema.md) | Revisium meaning tables, versioned vs runtime |
