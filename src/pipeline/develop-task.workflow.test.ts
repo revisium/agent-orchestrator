@@ -394,6 +394,50 @@ test('verdictOf: non-object output (string) → BLOCKER (fail-closed)', () => {
   assert.equal(verdictOf(r), 'BLOCKER');
 });
 
+// ── 0008 dogfood fix: a real reviewer emits the verdict as a leading-token STRING ──
+
+test('verdictOf: free-text string "APPROVE — …" → PASS (real reviewer shape)', () => {
+  const r: AttemptResult = {
+    output: 'APPROVE — all plan tasks implemented correctly. All gates pass: tsc, lint:ci, 652/652 tests green.',
+    nextSteps: [],
+    costs: [],
+  };
+  assert.equal(verdictOf(r), 'PASS');
+});
+
+test('verdictOf: free-text string "REQUEST_CHANGES: …" → MAJOR', () => {
+  const r: AttemptResult = {
+    output: 'REQUEST_CHANGES: missing test for the .git suffix case at integrator.test.ts:120.',
+    nextSteps: [],
+    costs: [],
+  };
+  assert.equal(verdictOf(r), 'MAJOR');
+});
+
+test('verdictOf: free-text "BLOCKER …" string → BLOCKER', () => {
+  const r: AttemptResult = { output: 'BLOCKER empty diff — vacuous success.', nextSteps: [], costs: [] };
+  assert.equal(verdictOf(r), 'BLOCKER');
+});
+
+test('verdictOf: leading token wins — "REQUEST_CHANGES — the APPROVE criteria are unmet" → MAJOR', () => {
+  const r: AttemptResult = {
+    output: 'REQUEST_CHANGES — the APPROVE criteria are unmet: coverage dropped.',
+    nextSteps: [],
+    costs: [],
+  };
+  assert.equal(verdictOf(r), 'MAJOR');
+});
+
+test('verdictOf: lowercase leading token "approve …" → PASS (case-insensitive)', () => {
+  const r: AttemptResult = { output: 'approve, looks good to me', nextSteps: [], costs: [] };
+  assert.equal(verdictOf(r), 'PASS');
+});
+
+test('verdictOf: verdict word NOT at the start → BLOCKER (fail-closed, no incidental match)', () => {
+  const r: AttemptResult = { output: 'I would APPROVE but there are issues', nextSteps: [], costs: [] };
+  assert.equal(verdictOf(r), 'BLOCKER');
+});
+
 test('verdictOf: undefined output → BLOCKER (fail-closed)', () => {
   const r: AttemptResult = { output: undefined, nextSteps: [], costs: [] };
   assert.equal(verdictOf(r), 'BLOCKER');
