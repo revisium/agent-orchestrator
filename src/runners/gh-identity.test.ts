@@ -12,6 +12,7 @@ import {
   ghTokenEnvKey,
   resolveGhToken,
   makeExecGh,
+  resolvePinnedGh,
   redactTokens,
   type ExecFileFn,
 } from './gh-identity.js';
@@ -84,6 +85,42 @@ test('makeExecGh: leaves the ambient account untouched when no token is resolved
   const exec = makeExecGh({ execFile, env: { PATH: '/usr/bin' } });
   exec(['pr', 'list']);
   assert.equal(seenEnv?.GH_TOKEN, undefined, 'GH_TOKEN must NOT be injected when no token resolved');
+});
+
+test('resolvePinnedGh: returns a pinned execGh when the token resolves (0008 #1 fail-loud)', () => {
+  const execFile: ExecFileFn = (_file, args, opts) => {
+    // gh auth token --user → token; subsequent calls run with GH_TOKEN pinned.
+    if (args[0] === 'auth') return 'gho_pinnedtoken\n';
+    return opts.env?.GH_TOKEN === 'gho_pinnedtoken' ? 'revisium-io' : 'WRONG';
+  };
+  const result = resolvePinnedGh({ env: { REVO_GH_ACCOUNT: 'revisium-io' }, execFile });
+  assert.ok(!('needsHuman' in result), 'must resolve to a pinned execGh');
+  if (!('needsHuman' in result)) {
+    assert.equal(result.execGh(['api', 'user']), 'revisium-io', 'pinned execGh uses the resolved token');
+  }
+});
+
+test('resolvePinnedGh: FAILS LOUD (needsHuman) when the token cannot be resolved — never falls back to ambient', () => {
+  const execFile: ExecFileFn = () => {
+    throw new Error('keychain unavailable (detached host)');
+  };
+  const result = resolvePinnedGh({ env: {}, execFile });
+  assert.ok('needsHuman' in result, 'must block, not fall back to ambient');
+  if ('needsHuman' in result) {
+    assert.match(result.lesson, /REFUSING to fall back/i);
+    assert.match(result.lesson, /GH_TOKEN_REVISIUM_IO/, 'lesson names the keyring-free env fix');
+  }
+});
+
+test('resolvePinnedGh: env override resolves headless without touching the keyring', () => {
+  let shelledOut = false;
+  const execFile: ExecFileFn = (_file, args, opts) => {
+    if (args[0] === 'auth') { shelledOut = true; return ''; }
+    return opts.env?.GH_TOKEN === 'gho_fromenv' ? 'revisium-io' : 'WRONG';
+  };
+  const result = resolvePinnedGh({ env: { GH_TOKEN_REVISIUM_IO: 'gho_fromenv' }, execFile });
+  assert.ok(!('needsHuman' in result));
+  assert.equal(shelledOut, false, 'env override must NOT shell out to the keyring (headless-safe)');
 });
 
 test('redactTokens: masks GitHub token shapes in free text', () => {

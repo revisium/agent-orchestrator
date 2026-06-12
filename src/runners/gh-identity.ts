@@ -94,6 +94,37 @@ export function makeExecGh(opts?: {
   return (args: string[]) => execFile('gh', args, { encoding: 'utf8', timeout, maxBuffer, env });
 }
 
+/** Result of resolving the pinned gh identity: a pinned executor, or a fail-loud block. */
+export type PinnedGhResult = { execGh: ExecGhFn } | { needsHuman: true; lesson: string };
+
+/**
+ * Resolve the pinned gh identity into a ready-to-use ExecGhFn, or FAIL LOUD (0008 #1 hardening).
+ *
+ * The 2026-06-12 dogfood proved the original silent fallback was wrong: when the pinned token
+ * could not be resolved (e.g. a detached/headless host where `gh auth token --user` can't reach
+ * the macOS keychain), the integrator fell back to the AMBIENT gh account and opened a PR as the
+ * wrong user — re-introducing the exact bug #1 exists to prevent. We now REFUSE to fall back:
+ * an unresolved pinned identity returns needsHuman so the integrator blocks for a human instead
+ * of opening a PR as the wrong account. The keyring-free fix is to set GH_TOKEN_<ACCOUNT> in the
+ * host env (works headless), which resolveGhToken checks first.
+ */
+export function resolvePinnedGh(deps?: { env?: NodeJS.ProcessEnv; execFile?: ExecFileFn }): PinnedGhResult {
+  const env = deps?.env ?? process.env;
+  const account = resolveGhAccount(env);
+  const token = resolveGhToken(account, { env, execFile: deps?.execFile });
+  if (!token) {
+    return {
+      needsHuman: true,
+      lesson:
+        `could not resolve a token for the pinned gh account '${account}' — REFUSING to fall back to the ambient ` +
+        `gh account (0008 #1: a PR must never be opened by the wrong account). Fix: set ${ghTokenEnvKey(account)} in ` +
+        `the host env (keyring-free, works headless), or run on a host where 'gh auth token --user ${account}' can ` +
+        `reach the keychain.`,
+    };
+  }
+  return { execGh: makeExecGh({ token, env, execFile: deps?.execFile }) };
+}
+
 const TOKEN_PATTERN = /\b(?:gh[opsru]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g;
 
 /**

@@ -16,7 +16,7 @@ import { join, delimiter } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { ExecGhFn } from '../poller/pr-readiness.js';
 import { RunService } from '../revisium/run.service.js';
-import { makeExecGh, resolveGhAccount, resolveGhToken } from './gh-identity.js';
+import { resolveGhAccount, resolvePinnedGh } from './gh-identity.js';
 
 // ─── resolveExecutable ────────────────────────────────────────────────────────
 
@@ -266,7 +266,7 @@ function findOrCreatePr(
 export async function preflightLive(
   taskId: string,
   base: string,
-  deps: IntegratorDeps,
+  deps: Omit<IntegratorDeps, 'execGh'>,
 ): Promise<{ ok: true } | IntegratorBlocked> {
   const { execGit, resolveTaskCwd } = deps;
   const cwd = await resolveTaskCwd(taskId);
@@ -446,52 +446,39 @@ function defaultExecGit(args: string[], cwd: string): string {
 }
 
 /**
- * Build a lazily-pinned execGh (0008 #1). The first gh call resolves the non-secret account
- * name (default `revisium-io`) → host-resolves its token → returns an ExecGhFn with GH_TOKEN
- * pinned, so the ambient active-account flip can never break PR creation. Resolution is deferred
- * to the first call (live integrate only) so non-live host boots never shell out to gh.
- */
-function makePinnedExecGh(): ExecGhFn {
-  let pinned: ExecGhFn | undefined;
-  return (args: string[]) => {
-    if (!pinned) {
-      const account = resolveGhAccount();
-      const token = resolveGhToken(account);
-      pinned = makeExecGh({ token });
-      if (token) {
-        console.log(`[integrator] gh pinned to account '${account}' (GH_TOKEN, not ambient)`);
-      } else {
-        console.warn(
-          `[integrator] could not resolve a token for gh account '${account}'; ` +
-            'falling back to the ambient gh account — set REVO_GH_ACCOUNT / GH_TOKEN_<ACCOUNT> ' +
-            'or `gh auth login` that account.',
-        );
-      }
-    }
-    return pinned(args);
-  };
-}
-
-/**
  * IntegratorService — @Injectable wrapper over integrate / stubIntegrate / preflightLive.
  * Exposes bound arrow properties so they survive being passed to registerStep unbound.
  * DBOS-SEALED: zero @dbos-inc imports; PipelineService registers these as steps.
  */
 @Injectable()
 export class IntegratorService {
-  private readonly deps: IntegratorDeps;
+  private readonly deps: Omit<IntegratorDeps, 'execGh'>;
 
   constructor(private readonly runService: RunService) {
+    // execGh is resolved per-run inside runIntegrate (fail-loud on an unresolved pinned identity),
+    // so it is NOT built here — only the git + cwd deps are stable at construction.
     this.deps = {
       execGit: defaultExecGit,
-      execGh: makePinnedExecGh(),
       resolveTaskCwd: this.runService.makeResolveTaskCwd(),
     };
   }
 
-  /** Real integrator — live path. Arrow property: safe to pass unbound to registerStep. */
+  /**
+   * Real integrator — live path. Arrow property: safe to pass unbound to registerStep.
+   *
+   * 0008 #1 (fail-loud, 2026-06-12 dogfood): resolve the PINNED gh identity first. If its token
+   * cannot be resolved we REFUSE to fall back to the ambient gh account (which would open the PR
+   * as the wrong user) and block as needsHuman instead. Only on success do we run the integrator
+   * with the pinned execGh.
+   */
   runIntegrate = (input: IntegratorInput): Promise<IntegratorOutput | IntegratorBlocked> => {
-    return integrate(input, this.deps);
+    const pinned = resolvePinnedGh();
+    if ('needsHuman' in pinned) {
+      console.warn(`[integrator] ${pinned.lesson}`);
+      return Promise.resolve(pinned);
+    }
+    console.log(`[integrator] gh pinned to account '${resolveGhAccount()}' (GH_TOKEN, not ambient)`);
+    return integrate(input, { ...this.deps, execGh: pinned.execGh });
   };
 
   /** Stub integrator — script path; zero external effects. */
