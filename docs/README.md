@@ -1,7 +1,8 @@
 # agent-orchestrator docs
 
 Documentation for the local AI-agent orchestrator built on Revisium. Repo-local context lives in
-[`../AGENTS.md`](../AGENTS.md); reusable method lives in the `../agents` repo.
+[`../AGENTS.md`](../AGENTS.md); reusable method lives in the `../agents` checkout of
+`revisium/agent-playbook`.
 
 ## Read order
 
