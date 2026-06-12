@@ -9,6 +9,7 @@
  *   - preflightLive(taskId, base, deps) — LIVE PREFLIGHT; clean check + base invariant; one-shot.
  *   - IntegratorService          — @Injectable wrapper with bound arrow properties.
  *   - resolveExecutable(name)    — resolve a bare executable name to an absolute PATH entry.
+ *   - parseOwnerRepo(remoteUrl)  — parse a GitHub SSH/HTTPS remote to "owner/repo" or null.
  */
 import { Injectable } from '@nestjs/common';
 import { existsSync, statSync } from 'node:fs';
@@ -125,7 +126,7 @@ function branchName(taskId: string, title: string): string {
 const GITHUB_SSH_RE = /^git@github\.com:([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/;
 const GITHUB_HTTPS_RE = /^https?:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/;
 
-function parseOwnerRepo(remoteUrl: string): string | null {
+export function parseOwnerRepo(remoteUrl: string): string | null {
   const ssh = GITHUB_SSH_RE.exec(remoteUrl.trim());
   if (ssh?.[1]) return ssh[1];
   const https = GITHUB_HTTPS_RE.exec(remoteUrl.trim());

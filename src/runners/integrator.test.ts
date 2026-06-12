@@ -12,6 +12,7 @@ import {
   stubIntegrate,
   preflightLive,
   resolveExecutable,
+  parseOwnerRepo,
   type IntegratorInput,
   type IntegratorDeps,
   type ExecFn,
@@ -737,6 +738,56 @@ test('regex: HTTPS trailing /tree/main path → rejected', async () => {
 test('regex: HTTPS missing repo segment → rejected', async () => {
   const result = await integrate(BASE_INPUT, makeRemoteOnlyDeps('https://github.com/o/'));
   assert.ok('needsHuman' in result, 'missing repo segment must reject');
+});
+
+// ─── parseOwnerRepo (direct) ──────────────────────────────────────────────────
+
+test('parseOwnerRepo: SSH plain → owner/repo', () => {
+  assert.equal(parseOwnerRepo('git@github.com:o/repo'), 'o/repo');
+});
+
+test('parseOwnerRepo: SSH .git stripped', () => {
+  assert.equal(parseOwnerRepo('git@github.com:o/repo.git'), 'o/repo');
+});
+
+test('parseOwnerRepo: SSH dotted and dashed names', () => {
+  assert.equal(parseOwnerRepo('git@github.com:my-org/my.repo'), 'my-org/my.repo');
+});
+
+test('parseOwnerRepo: HTTPS plain → owner/repo', () => {
+  assert.equal(parseOwnerRepo('https://github.com/o/repo'), 'o/repo');
+});
+
+test('parseOwnerRepo: HTTPS dotted .git stripped', () => {
+  assert.equal(parseOwnerRepo('https://github.com/o/my.repo.git'), 'o/my.repo');
+});
+
+test('parseOwnerRepo: http:// allowed (regex is https?)', () => {
+  assert.equal(parseOwnerRepo('http://github.com/o/repo'), 'o/repo');
+});
+
+test('parseOwnerRepo: surrounding whitespace trimmed', () => {
+  assert.equal(parseOwnerRepo('  git@github.com:o/repo  '), 'o/repo');
+});
+
+test('parseOwnerRepo: space in repo name → null', () => {
+  assert.equal(parseOwnerRepo('git@github.com:o/re po.git'), null);
+});
+
+test('parseOwnerRepo: HTTPS trailing path → null', () => {
+  assert.equal(parseOwnerRepo('https://github.com/o/repo/tree/main'), null);
+});
+
+test('parseOwnerRepo: HTTPS missing repo segment → null', () => {
+  assert.equal(parseOwnerRepo('https://github.com/o/'), null);
+});
+
+test('parseOwnerRepo: non-github host → null', () => {
+  assert.equal(parseOwnerRepo('https://gitlab.com/o/repo'), null);
+});
+
+test('parseOwnerRepo: empty string → null', () => {
+  assert.equal(parseOwnerRepo(''), null);
 });
 
 // ─── errors propagate (transient git/gh errors → throw for DBOS retry) ─────────
