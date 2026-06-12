@@ -36,17 +36,19 @@ two-process Postgres, human gates — a single run from `run create` to an open 
 | [0004 — Human gates via DBOS + inbox](./plans/0004-human-gates-via-dbos-inbox.md) | **Landed** | plan + merge gates: `pushInbox` → `DBOS.recv`; `inbox resolve` → `DBOS.send` |
 | [0005 — Real runners + integrator](./plans/0005-real-runners-and-integrator.md) | **Landed** | Claude Code runner as Nest service; integrator branch/commit/PR |
 | [0006 — End-to-end MVP](./plans/0006-end-to-end-mvp.md) | **Landed** | one `revo` command boot→run→PR; dogfood; rewrite getting-started |
-| 0007 — Publishable alpha | **Landed** | `@revisium/orchestrator` packaging + seed test (PR #35) |
-| 0008 — Alpha hardening | **Landed** | gh-account pinning, failure surfacing, per-attempt observability, params-as-data (PR #37) |
+| [0007 — Publishable alpha](./plans/0007-publishable-alpha.md) | **Landed** | `@revisium/orchestrator` packaging + seed test (PR #35) |
+| [0008 — Alpha hardening](./plans/0008-alpha-hardening.md) | **Landed** | gh-account pinning, failure surfacing, per-attempt observability, params-as-data (PR #37) |
 
-Plan files under [docs/plans/](./plans/) keep their original authoring status headers (Draft); this table is the
-source of truth for landed status.
+Plan files under [docs/plans/](./plans/) keep their original authoring status headers (Draft, or "Landed —
+retrospective record" for 0007/0008, which were documented after execution); this table is the source of truth
+for landed status.
 
 ## Dogfooding ladder
 
 How the orchestrator earns its own development work, stage by stage. Each stage has an entry bar and an exit
 criterion; we do not skip rungs. **Rule: every new slice in this roadmap is tagged with the stage it is executed
-in (D0/D1/…).** See [vision.md](./vision.md) for where the ladder leads.
+in (D0/D1/…) — as a `Stage: Dn` marker in its roadmap-table Scope cell and in the plan file's status header.**
+Slices 0001–0008 predate the ladder and are untagged. See [vision.md](./vision.md) for where the ladder leads.
 
 - **D0 — playbook-driven manual development** *(current)*. Tasks run manually via the canonical agent playbook
   (Claude Code / Codex as orchestrator). Architecture, process, and vision work lives here.

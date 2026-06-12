@@ -36,3 +36,5 @@ reference docs in [`../`](../) (the durable *what / why*).
 | [0004-human-gates-via-dbos-inbox](./0004-human-gates-via-dbos-inbox.md) | Draft |
 | [0005-real-runners-and-integrator](./0005-real-runners-and-integrator.md) | Draft |
 | [0006-end-to-end-mvp](./0006-end-to-end-mvp.md) | Draft |
+| [0007-publishable-alpha](./0007-publishable-alpha.md) | Landed (retrospective record) |
+| [0008-alpha-hardening](./0008-alpha-hardening.md) | Landed (retrospective record) |

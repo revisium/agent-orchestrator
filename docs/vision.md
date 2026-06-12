@@ -44,7 +44,7 @@ marks what exists today vs what is planned.*
 - Durable execution (DBOS): a crash is not a loss; the run resumes from the first unfinished step.
 - Two mandatory gates: plan and merge. The human decides — the system waits.
 - A human decision is a state change: one-action approve, wherever it's convenient.
-- The inbox comes to the developer: GitHub, messenger, their own agent (MCP) — not the other way round.
+- The inbox comes to the developer: GitHub, messenger, their own agent (MCP) — not the other way around.
 - Roles, prompts, policies, models are versioned typed data: diff, review, rollback.
 - Plans and ADRs are artifacts with review and comments, not chat messages.
 - Human comments (PR, plan, diff) are ordinary pipeline steps: agents triage and act on them.
