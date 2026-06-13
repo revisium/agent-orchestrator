@@ -1,12 +1,10 @@
 import { Module } from '@nestjs/common';
-import { EngineModule } from '../engine/dbos.module.js';
-import { PipelineModule } from '../pipeline/pipeline.module.js';
-import { RevisiumModule } from '../revisium/revisium.module.js';
+import { TaskControlPlaneModule } from '../task-control-plane/task-control-plane.module.js';
 import { McpFacadeService } from './mcp-facade.service.js';
 import { McpStdioService } from './mcp-stdio.service.js';
 
 @Module({
-  imports: [EngineModule, RevisiumModule, PipelineModule],
+  imports: [TaskControlPlaneModule],
   providers: [McpFacadeService, McpStdioService],
   exports: [McpFacadeService, McpStdioService],
 })

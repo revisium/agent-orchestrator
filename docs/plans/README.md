@@ -40,3 +40,4 @@ reference docs in [`../`](../) (the durable *what / why*).
 | [0008-alpha-hardening](./0008-alpha-hardening.md) | Landed (retrospective record) |
 | [0009-playbook-install](./0009-playbook-install.md) | Ready to execute |
 | [0011-mcp-task-control-plane](./0011-mcp-task-control-plane.md) | Implemented in this PR |
+| [0012-mcp-api-service-boundary](./0012-mcp-api-service-boundary.md) | Implemented in this PR |
