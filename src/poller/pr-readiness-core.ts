@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
 
 export type PrReadinessVerdict =
   | 'ready'
@@ -51,7 +52,16 @@ export type StatusContextNode = {
   state: 'PENDING' | 'SUCCESS' | 'FAILURE' | 'ERROR';
 };
 
-export type CheckItem = CheckRunNode | StatusContextNode;
+export type UnknownCheckNode = {
+  __typename: string;
+  name?: string;
+  context?: string;
+  status?: string;
+  conclusion?: string | null;
+  state?: string;
+};
+
+export type CheckItem = UnknownCheckNode;
 
 export type ReviewEntry = {
   user: { login: string; type?: string } | null;
@@ -113,8 +123,22 @@ type PrViewData = {
 
 export type ExecGhFn = (args: string[]) => string;
 
+const GH_EXECUTABLE_CANDIDATES = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'] as const;
+
+function resolveGhExecutable(): string {
+  for (const candidate of GH_EXECUTABLE_CANDIDATES) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Try the next fixed system location.
+    }
+  }
+  throw new Error(`gh executable not found in fixed locations: ${GH_EXECUTABLE_CANDIDATES.join(', ')}`);
+}
+
 export function defaultExecGh(args: string[]): string {
-  return execFileSync('gh', args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
+  return execFileSync(resolveGhExecutable(), args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
 }
 
 export type SonarResult = {
@@ -321,6 +345,18 @@ function isPassed(item: CheckItem): boolean {
   return item.state === 'SUCCESS';
 }
 
+function checkName(item: CheckItem): string {
+  if (item.__typename === 'CheckRun') return item.name ?? 'unknown';
+  return item.context ?? item.name ?? 'unknown';
+}
+
+function checkResult(item: CheckItem): string {
+  if (item.__typename === 'CheckRun') {
+    return item.status === 'COMPLETED' ? (item.conclusion ?? 'unknown') : (item.status ?? 'unknown');
+  }
+  return item.state ?? 'unknown';
+}
+
 function isBot(user: { login: string; type?: string } | null | undefined): boolean {
   return user?.type === 'Bot';
 }
@@ -332,16 +368,8 @@ export function collectCiChecks(
   const ci_passed = !pending && items.every((item) => isPassed(item));
   const pendingNames = items
     .filter((item) => !isTerminal(item))
-    .map((item) => (item.__typename === 'CheckRun' ? item.name : (item as StatusContextNode).context ?? 'unknown'));
-  const checks = items.map((item) => {
-    if (item.__typename === 'CheckRun') {
-      return { name: item.name, result: item.status === 'COMPLETED' ? (item.conclusion ?? 'unknown') : item.status };
-    }
-    return {
-      name: (item as StatusContextNode).context ?? (item as { name?: string }).name ?? 'unknown',
-      result: (item as StatusContextNode).state ?? 'unknown',
-    };
-  });
+    .map(checkName);
+  const checks = items.map((item) => ({ name: checkName(item), result: checkResult(item) }));
   return { pending, ci_passed, checks, pendingNames };
 }
 
@@ -518,6 +546,12 @@ function locationOf(item: { component?: string; path?: string; line?: number }) 
   return item.line ? `${path}:${item.line}` : path;
 }
 
+function providerWaitFeedback(state: ReturnType<typeof providerState>) {
+  const codeRabbit = state.codeRabbit;
+  if (!codeRabbit || codeRabbit.state !== 'waiting') return [];
+  return [{ provider: 'CodeRabbit', reason: codeRabbit.reason, evidence: codeRabbit.evidence ?? codeRabbit.statusContext }];
+}
+
 function buildFeedback(input: {
   checks: ReturnType<typeof compactCheckLists>;
   providerState: ReturnType<typeof providerState>;
@@ -570,10 +604,7 @@ function buildFeedback(input: {
       location: locationOf(comment),
     }));
 
-  const codeRabbit = input.providerState.codeRabbit;
-  const providerWait = codeRabbit && codeRabbit.state === 'waiting'
-    ? [{ provider: 'CodeRabbit', reason: codeRabbit.reason, evidence: codeRabbit.evidence ?? codeRabbit.statusContext }]
-    : [];
+  const providerWait = providerWaitFeedback(input.providerState);
 
   const humanDecisions = [
     ...(input.reviewDecision && input.reviewDecision !== 'APPROVED'
@@ -658,6 +689,138 @@ function prFromView(prNumber: number, view?: PrViewData): PrReadinessResult['pr'
   };
 }
 
+function emptySonar(configured: boolean): PrReadinessResult['sonar'] {
+  return { configured, issues: [], hotspots: [], unavailable: false };
+}
+
+function emptyReviewThreads(included: boolean): PrReadinessResult['reviewThreads'] {
+  return { included, unresolvedCount: 0, items: [] };
+}
+
+function emptyCiSummary(ciPassed: boolean): CiSummary {
+  return { ci_passed: ciPassed, checks: [], sonar_issues: [], sonar_hotspots_to_review: [], human_reviews: [], human_comments: [], bot_comments: [] };
+}
+
+function buildEmptyFeedback(input: {
+  sonarConfigured: boolean;
+  includeReviewThreads: boolean;
+  reviewDecision?: string;
+  reviewThreads?: PrReadinessResult['reviewThreads'];
+}) {
+  return buildFeedback({
+    checks: compactCheckLists([]),
+    providerState: {},
+    sonar: emptySonar(input.sonarConfigured),
+    reviewDecision: input.reviewDecision ?? '',
+    reviewThreads: input.reviewThreads ?? emptyReviewThreads(input.includeReviewThreads),
+    humanReviews: [],
+    humanComments: [],
+    botComments: [],
+  });
+}
+
+function buildMergedReadiness(input: PrReadinessInput, resolved: Extract<OpenPrResult, { kind: 'merged' }>): PrReadinessResult {
+  const includeReviewThreads = input.includeReviewThreads !== false;
+  const sonarConfigured = Boolean(input.sonarProject);
+  return {
+    verdict: 'merged',
+    pr: prFromView(resolved.prNumber, resolved.prView),
+    checks: compactCheckLists([]),
+    reviewDecision: '',
+    reviewThreads: emptyReviewThreads(includeReviewThreads),
+    providerState: {},
+    sonar: emptySonar(sonarConfigured),
+    nextAction: 'none',
+    evidence: [`PR #${resolved.prNumber} is merged.`],
+    feedback: buildEmptyFeedback({ sonarConfigured, includeReviewThreads }),
+    ciSummary: emptyCiSummary(true),
+  };
+}
+
+function buildNeedsHumanReadiness(input: PrReadinessInput, resolved: Extract<OpenPrResult, { kind: 'needsHuman' }>): PrReadinessResult {
+  const includeReviewThreads = input.includeReviewThreads !== false;
+  const sonarConfigured = Boolean(input.sonarProject);
+  const feedback = buildEmptyFeedback({ sonarConfigured, includeReviewThreads });
+  return {
+    verdict: resolved.verdict === 'closed' ? 'closed' : 'needs_human',
+    pr: resolved.prNumber ? prFromView(resolved.prNumber, resolved.prView) : emptyPr(input.prNumber, resolved.verdict),
+    checks: compactCheckLists([]),
+    reviewDecision: '',
+    reviewThreads: emptyReviewThreads(includeReviewThreads),
+    providerState: {},
+    sonar: emptySonar(sonarConfigured),
+    nextAction: 'human_decision',
+    evidence: [resolved.lesson],
+    feedback: { ...feedback, humanDecisions: [{ source: 'pr_resolution', summary: resolved.lesson }] },
+    ciSummary: emptyCiSummary(false),
+  };
+}
+
+function buildWaitingReadiness(input: {
+  prNumber: number;
+  prView: PrViewData;
+  checkLists: ReturnType<typeof compactCheckLists>;
+  ci: ReturnType<typeof collectCiChecks>;
+  reviewThreads: PrReadinessResult['reviewThreads'];
+  sonarConfigured: boolean;
+  evidence: string[];
+  isDraft?: boolean;
+}): PrReadinessResult {
+  const feedback = buildFeedback({
+    checks: input.checkLists,
+    providerState: {},
+    sonar: emptySonar(input.sonarConfigured),
+    reviewDecision: input.prView.reviewDecision ?? '',
+    reviewThreads: input.reviewThreads,
+    humanReviews: [],
+    humanComments: [],
+    botComments: [],
+  });
+
+  return {
+    verdict: 'waiting',
+    pr: prFromView(input.prNumber, input.prView),
+    checks: input.checkLists,
+    reviewDecision: input.prView.reviewDecision ?? '',
+    reviewThreads: input.reviewThreads,
+    providerState: {},
+    sonar: emptySonar(input.sonarConfigured),
+    nextAction: 'watcher_wait',
+    evidence: input.evidence,
+    feedback,
+    ciSummary: {
+      ci_passed: false,
+      checks: input.ci.checks,
+      ...(input.isDraft ? { isDraft: true } : {}),
+      sonar_issues: [],
+      sonar_hotspots_to_review: [],
+      human_reviews: [],
+      human_comments: [],
+      bot_comments: [],
+    },
+  };
+}
+
+function readinessAction(input: {
+  ci: ReturnType<typeof collectCiChecks>;
+  feedback: ReturnType<typeof buildFeedback>;
+  providers: ReturnType<typeof providerState>;
+}): { verdict: PrReadinessVerdict; nextAction: PrReadinessNextAction } {
+  if (input.providers.codeRabbit?.reason === 'provider_limit' || input.providers.codeRabbit?.reason === 'review_in_progress') {
+    return { verdict: 'waiting', nextAction: 'watcher_wait' };
+  }
+  if (!input.ci.ci_passed || input.feedback.developerFixes.length > 0) {
+    return { verdict: 'needs_work', nextAction: 'developer_fix' };
+  }
+  if (input.feedback.reviewerQuestions.length > 0) {
+    return { verdict: 'needs_human', nextAction: 'reviewer_triage' };
+  }
+  if (input.feedback.humanDecisions.length > 0) {
+    return { verdict: 'needs_human', nextAction: 'human_decision' };
+  }
+  return { verdict: 'ready', nextAction: 'ready_for_merge_gate' };
+}
+
 export async function collectPrReadiness(
   input: PrReadinessInput,
   execGh: ExecGhFn = defaultExecGh,
@@ -667,57 +830,11 @@ export async function collectPrReadiness(
   const resolved = resolveOpenPr(input, baseBranch, execGh);
 
   if (resolved.kind === 'merged') {
-    const pr = prFromView(resolved.prNumber, resolved.prView);
-    const feedback = buildFeedback({
-      checks: compactCheckLists([]),
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      reviewDecision: '',
-      reviewThreads: { included: input.includeReviewThreads !== false, unresolvedCount: 0, items: [] },
-      humanReviews: [],
-      humanComments: [],
-      botComments: [],
-    });
-    return {
-      verdict: 'merged',
-      pr,
-      checks: compactCheckLists([]),
-      reviewDecision: '',
-      reviewThreads: { included: input.includeReviewThreads !== false, unresolvedCount: 0, items: [] },
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      nextAction: 'none',
-      evidence: [`PR #${resolved.prNumber} is merged.`],
-      feedback,
-      ciSummary: { ci_passed: true, checks: [], sonar_issues: [], sonar_hotspots_to_review: [], human_reviews: [], human_comments: [], bot_comments: [] },
-    };
+    return buildMergedReadiness(input, resolved);
   }
 
   if (resolved.kind === 'needsHuman') {
-    const pr = resolved.prNumber ? prFromView(resolved.prNumber, resolved.prView) : emptyPr(input.prNumber, resolved.verdict);
-    const feedback = buildFeedback({
-      checks: compactCheckLists([]),
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      reviewDecision: '',
-      reviewThreads: { included: input.includeReviewThreads !== false, unresolvedCount: 0, items: [] },
-      humanReviews: [],
-      humanComments: [],
-      botComments: [],
-    });
-    return {
-      verdict: resolved.verdict === 'closed' ? 'closed' : 'needs_human',
-      pr,
-      checks: compactCheckLists([]),
-      reviewDecision: '',
-      reviewThreads: { included: input.includeReviewThreads !== false, unresolvedCount: 0, items: [] },
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      nextAction: 'human_decision',
-      evidence: [resolved.lesson],
-      feedback: { ...feedback, humanDecisions: [{ source: 'pr_resolution', summary: resolved.lesson }] },
-      ciSummary: { ci_passed: false, checks: [], sonar_issues: [], sonar_hotspots_to_review: [], human_reviews: [], human_comments: [], bot_comments: [] },
-    };
+    return buildNeedsHumanReadiness(input, resolved);
   }
 
   const { prNumber, prView } = resolved;
@@ -725,57 +842,31 @@ export async function collectPrReadiness(
   const ci = collectCiChecks(checks);
   const checkLists = compactCheckLists(ci.checks);
   const reviewThreads = collectReviewThreads(input, prNumber, execGh);
+  const sonarConfigured = Boolean(input.sonarProject);
 
   if (prView.isDraft === true) {
-    const feedback = buildFeedback({
-      checks: checkLists,
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      reviewDecision: prView.reviewDecision ?? '',
+    return buildWaitingReadiness({
+      prNumber,
+      prView,
+      checkLists,
+      ci,
       reviewThreads,
-      humanReviews: [],
-      humanComments: [],
-      botComments: [],
-    });
-    return {
-      verdict: 'waiting',
-      pr: prFromView(prNumber, prView),
-      checks: checkLists,
-      reviewDecision: prView.reviewDecision ?? '',
-      reviewThreads,
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      nextAction: 'watcher_wait',
+      sonarConfigured,
       evidence: [`PR #${prNumber} is still draft.`],
-      feedback,
-      ciSummary: { ci_passed: false, checks: ci.checks, isDraft: true, sonar_issues: [], sonar_hotspots_to_review: [], human_reviews: [], human_comments: [], bot_comments: [] },
-    };
+      isDraft: true,
+    });
   }
 
   if (ci.pending) {
-    const feedback = buildFeedback({
-      checks: checkLists,
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      reviewDecision: prView.reviewDecision ?? '',
+    return buildWaitingReadiness({
+      prNumber,
+      prView,
+      checkLists,
+      ci,
       reviewThreads,
-      humanReviews: [],
-      humanComments: [],
-      botComments: [],
-    });
-    return {
-      verdict: 'waiting',
-      pr: prFromView(prNumber, prView),
-      checks: checkLists,
-      reviewDecision: prView.reviewDecision ?? '',
-      reviewThreads,
-      providerState: {},
-      sonar: { configured: Boolean(input.sonarProject), issues: [], hotspots: [], unavailable: false },
-      nextAction: 'watcher_wait',
+      sonarConfigured,
       evidence: ci.pendingNames.length > 0 ? [`Pending checks: ${ci.pendingNames.join(', ')}`] : ['No check rollup entries are registered yet.'],
-      feedback,
-      ciSummary: { ci_passed: false, checks: ci.checks, sonar_issues: [], sonar_hotspots_to_review: [], human_reviews: [], human_comments: [], bot_comments: [] },
-    };
+    });
   }
 
   const sonar = input.sonarProject
@@ -813,21 +904,7 @@ export async function collectPrReadiness(
     ...(sonar.unavailable ? { sonar_unavailable: true } : {}),
   };
 
-  let verdict: PrReadinessVerdict = 'ready';
-  let nextAction: PrReadinessNextAction = 'ready_for_merge_gate';
-  if (providers.codeRabbit?.reason === 'provider_limit' || providers.codeRabbit?.reason === 'review_in_progress') {
-    verdict = 'waiting';
-    nextAction = 'watcher_wait';
-  } else if (!ci.ci_passed || feedback.developerFixes.length > 0) {
-    verdict = 'needs_work';
-    nextAction = 'developer_fix';
-  } else if (feedback.reviewerQuestions.length > 0) {
-    verdict = 'needs_human';
-    nextAction = 'reviewer_triage';
-  } else if (feedback.humanDecisions.length > 0) {
-    verdict = 'needs_human';
-    nextAction = 'human_decision';
-  }
+  const { verdict, nextAction } = readinessAction({ ci, feedback, providers });
 
   return {
     verdict,
