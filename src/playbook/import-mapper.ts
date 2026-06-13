@@ -72,7 +72,7 @@ function hash(value: unknown): string {
 }
 
 function isSafeRowIdChar(value: string): boolean {
-  const code = value.charCodeAt(0);
+  const code = value.codePointAt(0) ?? 0;
   return (
     (code >= 48 && code <= 57) ||
     (code >= 65 && code <= 90) ||
