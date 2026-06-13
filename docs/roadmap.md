@@ -39,6 +39,7 @@ two-process Postgres, human gates — a single run from `run create` to an open 
 | [0007 — Publishable alpha](./plans/0007-publishable-alpha.md) | **Landed** | `@revisium/orchestrator` packaging + seed test (PR #35) |
 | [0008 — Alpha hardening](./plans/0008-alpha-hardening.md) | **Landed** | gh-account pinning, failure surfacing, per-attempt observability, params-as-data (PR #37) |
 | [0009 — Playbook install](./plans/0009-playbook-install.md) | **Ready to execute** | Stage: D1-enabling; `revo playbook install` imports `@revisium/agent-playbook` catalogs as versioned meaning data; workflow-as-data remains later |
+| [0011 — MCP task development control plane](./plans/0011-mcp-task-control-plane.md) | **Implemented in this PR** | Stage: D2-enabling; local stdio MCP front door for runs, inbox gates, playbooks/roles/pipelines, repository diagnostics, and route simulation |
 
 Plan files under [docs/plans/](./plans/) keep their original authoring status headers (Draft, or "Landed —
 retrospective record" for 0007/0008, which were documented after execution); this table is the source of truth
@@ -69,8 +70,8 @@ Slices 0001–0008 predate the ladder and are untagged. See [vision.md](./vision
 
 - **Playbook import:** Plan 0009 adds `revo playbook install` for local/package catalog import. Remaining follow-up:
   remote source resolution and using imported pipelines for route proposal/workflow-as-data.
-- **Front-door adapters:** REST API (read-only dashboard first) + MCP server, over the same core. The MCP entry
-  gates D2.
+- **Front-door adapters:** Plan 0011 adds the local stdio MCP entry. REST API / read-only dashboard remains
+  unscheduled.
 - **Workflow as data:** a generic "execute plan" DBOS workflow that reads the next steps from Revisium —
   restoring the "workflow = data" invariant (ADR-0001 §5). The core of D4.
 - **Multi-repo strategies:** primitives / engine / strategies (the old `multi-repo-strategies.md` design).

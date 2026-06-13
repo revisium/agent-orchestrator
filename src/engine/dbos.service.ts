@@ -61,6 +61,10 @@ export type PingResult = {
   markerCount: number;
 };
 
+export type DbosConfigOptions = {
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+};
+
 /** Registered workflow and step functions (assigned in constructor). */
 type PingWorkflowFn = (workflowID: string, sleepMs: number, markerFile: string) => Promise<PingResult>;
 type MarkStepFn = (workflowID: string, markerFile: string) => Promise<number>;
@@ -229,8 +233,12 @@ export class DbosService {
    * Configure DBOS with the pid-proven system database URL.
    * Must be called before launch().
    */
-  setConfig(systemDatabaseUrl: string): void {
-    DBOS.setConfig({ name: 'agent-orchestrator', systemDatabaseUrl });
+  setConfig(systemDatabaseUrl: string, options: DbosConfigOptions = {}): void {
+    DBOS.setConfig({
+      name: 'agent-orchestrator',
+      systemDatabaseUrl,
+      ...(options.logLevel ? { logLevel: options.logLevel } : {}),
+    });
   }
 
   /**

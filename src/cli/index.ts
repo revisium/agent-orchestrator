@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { needsHost } from './needs-host.js';
+import { isMcpCommand, needsHost } from './needs-host.js';
 import { buildProgram } from './program.js';
 
 const argv = process.argv;
@@ -7,9 +7,11 @@ const argv = process.argv;
 if (needsHost(argv)) {
   // Host path: dev:ping, dev:status (and future run/work when they move onto DBOS).
   // Nest/DBOS/AppModule are imported lazily so the host-free path never loads them.
+  const mcpCommand = isMcpCommand(argv);
+  if (mcpCommand) process.env.REVO_MCP_STDIO = '1';
   const { NestFactory } = await import('@nestjs/core');
   const { AppModule } = await import('../app.module.js');
-  const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error', 'warn'] });
+  const app = await NestFactory.createApplicationContext(AppModule, { logger: mcpCommand ? false : ['error', 'warn'] });
   try {
     await buildProgram(app).parseAsync(argv);
   } finally {

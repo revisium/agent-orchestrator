@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { needsHost } from './needs-host.js';
+import { isMcpCommand, needsHost } from './needs-host.js';
 
 // Helper: build a process.argv-style array (node + script + args).
 function argv(...args: string[]): string[] {
@@ -71,6 +71,20 @@ test('needsHost: run start --help → false (help wins)', () => {
 
 test('needsHost: work → false', () => {
   assert.equal(needsHost(argv('work', '--once')), false);
+});
+
+test('needsHost: mcp → true (stdio server uses host services)', () => {
+  assert.equal(needsHost(argv('mcp')), true);
+});
+
+test('needsHost: mcp --help → false (help wins)', () => {
+  assert.equal(needsHost(argv('mcp', '--help')), false);
+});
+
+test('isMcpCommand: true only for executable mcp command', () => {
+  assert.equal(isMcpCommand(argv('mcp')), true);
+  assert.equal(isMcpCommand(argv('mcp', '--help')), false);
+  assert.equal(isMcpCommand(argv('run', 'create', '--title', 'mcp', '--repo', '.')), false);
 });
 
 test('needsHost: --help anywhere → false (even before dev:ping)', () => {

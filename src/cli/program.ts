@@ -1,26 +1,16 @@
-import { readFileSync } from 'node:fs';
 import type { INestApplicationContext } from '@nestjs/common';
 import { Command } from 'commander';
+import { readPackageVersion } from '../package-info.js';
 import { registerBootstrap } from './commands/bootstrap.js';
 import { registerDev } from './commands/dev.js';
 import { registerInbox } from './commands/inbox.js';
+import { registerMcp } from './commands/mcp.js';
 import { registerPlaybook } from './commands/playbook.js';
 import { registerRevisium } from './commands/revisium.js';
 import { registerRun } from './commands/run.js';
 import { registerWork } from './commands/work.js';
 
-// Read the version from package.json at runtime. A static JSON import is avoided: tsconfig has no
-// resolveJsonModule and package.json lives outside rootDir ("src"). '../../package.json' is correct
-// from this file in BOTH dev (tsx src/cli/program.ts) and the built output (dist/cli/program.js) —
-// each sits exactly two levels below the repo root (bin/revo.js runs dist/cli/index.js).
-export function readPackageVersion(): string {
-  const raw = readFileSync(new URL('../../package.json', import.meta.url), 'utf8');
-  const pkg = JSON.parse(raw) as { version?: string };
-  if (typeof pkg.version !== 'string' || pkg.version === '') {
-    throw new Error('package.json is missing a "version" field');
-  }
-  return pkg.version;
-}
+export { readPackageVersion };
 
 /**
  * Build the commander program.
@@ -43,6 +33,7 @@ export function buildProgram(app?: INestApplicationContext): Command {
   registerRun(program, app);
   registerWork(program);
   registerInbox(program, app); // G6: forward app so gate resolve path can access DbosService
+  registerMcp(program, app);
   registerDev(program, app);
   return program;
 }

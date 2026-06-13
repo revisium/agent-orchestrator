@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { EngineModule } from './engine/dbos.module.js';
+import { McpModule } from './mcp/mcp.module.js';
 import { PipelineModule } from './pipeline/pipeline.module.js';
 import { HostLifecycle } from './host/host.lifecycle.js';
 
@@ -11,7 +12,7 @@ import { HostLifecycle } from './host/host.lifecycle.js';
  * calls dbosService.launch() — required by DBOS recovery (OQ-4).
  */
 @Module({
-  imports: [EngineModule, PipelineModule],
+  imports: [EngineModule, PipelineModule, McpModule],
   providers: [HostLifecycle],
 })
 export class AppModule {}

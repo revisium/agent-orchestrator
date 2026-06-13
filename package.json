@@ -18,6 +18,9 @@
   "publishConfig": {
     "access": "public"
   },
+  "overrides": {
+    "@hono/node-server": "1.19.13"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
@@ -42,13 +45,15 @@
   },
   "dependencies": {
     "@dbos-inc/dbos-sdk": "4.19.8",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@nestjs/common": "11.1.24",
     "@nestjs/core": "11.1.24",
     "@revisium/client": "^0.6.0",
     "@revisium/standalone": "^2.8.2",
     "commander": "^12.1.0",
     "pg": "8.21.0",
-    "reflect-metadata": "0.2.2"
+    "reflect-metadata": "0.2.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

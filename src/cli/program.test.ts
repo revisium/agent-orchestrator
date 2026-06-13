@@ -20,6 +20,11 @@ test('buildProgram: registers playbook install command', () => {
   assert.ok(playbook.commands.some((cmd) => cmd.name() === 'install'), 'playbook install must be registered');
 });
 
+test('buildProgram: registers mcp command', () => {
+  const program = buildProgram();
+  assert.ok(program.commands.some((cmd) => cmd.name() === 'mcp'), 'mcp command must be registered');
+});
+
 for (const flag of ['--version', '-v']) {
   test(`buildProgram: ${flag} prints the package.json version and exits via commander`, () => {
     const program = buildProgram().exitOverride();
