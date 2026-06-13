@@ -131,7 +131,7 @@ function mapPipeline(playbookId: string, pipeline: PipelineCatalogRecord, now: s
       optional_roles: pipeline.optionalRoles,
       route_gates: pipeline.routeGates,
       platform_invocation: pipeline.platformInvocation,
-      execution_policy_json: JSON.stringify(pipeline.executionPolicy ?? {}),
+      execution_policy_json: JSON.stringify(pipeline.executionPolicy),
       updated_at: now,
     },
   };

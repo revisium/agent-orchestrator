@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PlaybookInstaller } from './playbook-installer.js';
 import type { VersionedMeaningAccess, VersionedMeaningOperation, VersionedMeaningRow } from '../control-plane/versioned-meaning.js';
@@ -84,7 +84,7 @@ test('PlaybookInstaller: validates, maps, and writes playbook rows', async () =>
     sourceResolverOptions: { cwd: join(root, '..') },
   });
 
-  const result = await installer.install({ source: `./${root.split('/').pop()}`, commit: true });
+  const result = await installer.install({ source: `./${basename(root)}`, commit: true });
 
   assert.equal(result.playbookId, 'pb');
   assert.equal(result.roles, 1);
@@ -111,7 +111,7 @@ test('PlaybookInstaller: dry-run never calls the versioned writer', async () => 
     sourceResolverOptions: { cwd: join(root, '..') },
   });
 
-  const result = await installer.install({ source: `./${root.split('/').pop()}`, dryRun: true, commit: true });
+  const result = await installer.install({ source: `./${basename(root)}`, dryRun: true, commit: true });
 
   assert.equal(writes, 0);
   assert.equal(result.dryRun, true);

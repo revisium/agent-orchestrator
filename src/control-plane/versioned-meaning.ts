@@ -16,16 +16,20 @@ export type VersionedMeaningOperation = {
   rowId: string;
 };
 
+export type VersionedMeaningRevision = {
+  id?: unknown;
+};
+
 export type VersionedMeaningScope = {
   getRow(tableId: string, rowId: string): Promise<unknown>;
   createRow(tableId: string, rowId: string, data: object): Promise<unknown>;
   updateRow(tableId: string, rowId: string, data: object): Promise<unknown>;
-  commit(comment?: string): Promise<unknown>;
+  commit(comment?: string): Promise<VersionedMeaningRevision>;
 };
 
 export type VersionedMeaningAccess = {
   upsertRow(row: VersionedMeaningRow): Promise<VersionedMeaningOperation>;
-  commit(message: string): Promise<unknown | null>;
+  commit(message: string): Promise<VersionedMeaningRevision | null>;
 };
 
 export type VersionedMeaningAccessOptions = {
