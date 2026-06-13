@@ -40,6 +40,7 @@ two-process Postgres, human gates — a single run from `run create` to an open 
 | [0008 — Alpha hardening](./plans/0008-alpha-hardening.md) | **Landed** | gh-account pinning, failure surfacing, per-attempt observability, params-as-data (PR #37) |
 | [0009 — Playbook install](./plans/0009-playbook-install.md) | **Ready to execute** | Stage: D1-enabling; `revo playbook install` imports `@revisium/agent-playbook` catalogs as versioned meaning data; workflow-as-data remains later |
 | [0011 — MCP task development control plane](./plans/0011-mcp-task-control-plane.md) | **Implemented in this PR** | Stage: D2-enabling; local stdio MCP front door for runs, inbox gates, playbooks/roles/pipelines, repository diagnostics, and route simulation |
+| [0012 — MCP API service boundary](./plans/0012-mcp-api-service-boundary.md) | **Implemented in this PR** | Stage: D2-enabling; keep MCP as transport and route product behavior through a protocol-neutral TaskControlPlane API service |
 
 Plan files under [docs/plans/](./plans/) keep their original authoring status headers (Draft, or "Landed —
 retrospective record" for 0007/0008, which were documented after execution); this table is the source of truth
