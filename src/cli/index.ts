@@ -8,7 +8,11 @@ if (needsHost(argv)) {
   // Host path: dev:ping, dev:status (and future run/work when they move onto DBOS).
   // Nest/DBOS/AppModule are imported lazily so the host-free path never loads them.
   const mcpCommand = isMcpCommand(argv);
-  if (mcpCommand) process.env.REVO_MCP_STDIO = '1';
+  if (mcpCommand) {
+    process.env.REVO_MCP_STDIO = '1';
+  } else {
+    delete process.env.REVO_MCP_STDIO;
+  }
   const { NestFactory } = await import('@nestjs/core');
   const { AppModule } = await import('../app.module.js');
   const app = await NestFactory.createApplicationContext(AppModule, { logger: mcpCommand ? false : ['error', 'warn'] });

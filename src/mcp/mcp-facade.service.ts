@@ -88,13 +88,11 @@ function readPackageContext(repoPath: string): { packageName: string; scripts: s
   const packagePath = join(repoPath, 'package.json');
   if (!existsSync(packagePath)) return { packageName: '', scripts: [], packageError: '' };
   try {
-    const parsed = JSON.parse(readFileSync(packagePath, 'utf8')) as {
-      name?: unknown;
-      scripts?: Record<string, unknown>;
-    };
+    const parsed = asRecord(JSON.parse(readFileSync(packagePath, 'utf8')));
+    const scripts = asRecord(parsed?.scripts);
     return {
-      packageName: typeof parsed.name === 'string' ? parsed.name : '',
-      scripts: parsed.scripts ? Object.keys(parsed.scripts).sort((left, right) => left.localeCompare(right)) : [],
+      packageName: typeof parsed?.name === 'string' ? parsed.name : '',
+      scripts: scripts ? Object.keys(scripts).sort((left, right) => left.localeCompare(right)) : [],
       packageError: '',
     };
   } catch (error) {
@@ -386,7 +384,7 @@ export class McpFacadeService {
       throw new ControlPlaneError('VALIDATION_FAILURE', `inbox item is not a plan or merge gate: ${inboxId}`);
     }
     const result = await this.inbox.resolveInbox(inboxId, answer, resolvedBy);
-    await this.dbos.signal(item.runId, topic, result.answer, inboxId);
+    await this.signalGate(item, topic, result.answer, inboxId);
     return {
       inboxId,
       previousStatus: result.status,
@@ -408,7 +406,7 @@ export class McpFacadeService {
     const result = await this.inbox.resolveInbox(input.inboxId, input.answer, input.resolvedBy ?? 'mcp');
     const shouldSignal = input.signalGate !== false && topic !== null;
     if (shouldSignal) {
-      await this.dbos.signal(item.runId, topic, result.answer, input.inboxId);
+      await this.signalGate(item, topic, result.answer, input.inboxId);
     }
     return {
       inboxId: input.inboxId,
@@ -418,6 +416,20 @@ export class McpFacadeService {
       topic,
       runId: item.runId,
     };
+  }
+
+  private async signalGate(item: InboxItem, topic: 'plan' | 'merge', answer: unknown, inboxId: string) {
+    const eventBase = {
+      runId: item.runId,
+      taskId: item.taskId,
+      stepId: item.stepId,
+      stepKey: `gate:${topic}`,
+      actor: 'mcp',
+      payload: { inboxId, topic },
+    };
+    await this.runs.appendEvent({ ...eventBase, type: 'gate_signal_pending' });
+    await this.dbos.signal(item.runId, topic, answer, inboxId);
+    await this.runs.appendEvent({ ...eventBase, type: 'gate_signaled' });
   }
 
   async summarizeGateRisk(inboxId: string) {

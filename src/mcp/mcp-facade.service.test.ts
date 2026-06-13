@@ -71,6 +71,7 @@ function makeFacade(overrides: {
     async listRunAttempts() {
       return [];
     },
+    async appendEvent() {},
     ...overrides.runService,
   };
   const inboxService: Partial<InboxService> = {
@@ -124,12 +125,20 @@ test('McpFacadeService.getCapabilities exposes the registered product tool surfa
   assert.ok(capabilities.tools.includes('simulate_route'));
 });
 
-test('McpFacadeService.approveGate resolves the inbox row and signals DBOS with the stored answer', async () => {
-  const calls: Array<{ workflowId: string; topic: string; payload: unknown; key?: string }> = [];
+test('McpFacadeService.approveGate records retryable signal state around the DBOS signal', async () => {
+  const calls: Array<
+    | { kind: 'event'; type: string; stepKey: string; payload: unknown }
+    | { kind: 'signal'; workflowId: string; topic: string; payload: unknown; key?: string }
+  > = [];
   const facade = makeFacade({
+    runService: {
+      async appendEvent(input) {
+        calls.push({ kind: 'event', type: input.type, stepKey: input.stepKey, payload: input.payload });
+      },
+    },
     dbosService: {
       async signal(workflowId, topic, payload, key) {
-        calls.push({ workflowId, topic, payload, key });
+        calls.push({ kind: 'signal', workflowId, topic, payload, key });
       },
     },
   });
@@ -140,12 +149,44 @@ test('McpFacadeService.approveGate resolves the inbox row and signals DBOS with 
   assert.equal(result.topic, 'plan');
   assert.deepEqual(calls, [
     {
+      kind: 'event',
+      type: 'gate_signal_pending',
+      stepKey: 'gate:plan',
+      payload: { inboxId: 'inbox-1', topic: 'plan' },
+    },
+    {
+      kind: 'signal',
       workflowId: 'run-1',
       topic: 'plan',
       payload: { decision: 'approve', resolvedBy: 'tester' },
       key: 'inbox-1',
     },
+    {
+      kind: 'event',
+      type: 'gate_signaled',
+      stepKey: 'gate:plan',
+      payload: { inboxId: 'inbox-1', topic: 'plan' },
+    },
   ]);
+});
+
+test('McpFacadeService.approveGate leaves pending signal state when DBOS signaling fails', async () => {
+  const events: string[] = [];
+  const facade = makeFacade({
+    runService: {
+      async appendEvent(input) {
+        events.push(input.type);
+      },
+    },
+    dbosService: {
+      async signal() {
+        throw new Error('signal failed');
+      },
+    },
+  });
+
+  await assert.rejects(() => facade.approveGate({ inboxId: 'inbox-1' }), /signal failed/);
+  assert.deepEqual(events, ['gate_signal_pending']);
 });
 
 test('McpFacadeService.answerQuestion refuses gate rows so workflows are not left parked', async () => {
@@ -220,4 +261,16 @@ test('McpFacadeService.getRepositoryContext reports malformed package metadata w
   assert.equal(result.packageName, '');
   assert.deepEqual(result.scripts, []);
   assert.match(result.packageError, /JSON/);
+});
+
+test('McpFacadeService.getRepositoryContext ignores non-object package scripts metadata', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'revo-mcp-test-'));
+  execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'pkg', scripts: 'oops' }), 'utf8');
+
+  const result = await makeFacade().getRepositoryContext(dir);
+
+  assert.equal(result.packageName, 'pkg');
+  assert.deepEqual(result.scripts, []);
+  assert.equal(result.packageError, '');
 });

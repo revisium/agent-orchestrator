@@ -27,8 +27,8 @@ export class McpStdioService {
       process.once('SIGTERM', resolve);
     });
 
-    await server.connect(transport);
     try {
+      await server.connect(transport);
       await closed;
     } finally {
       await server.close().catch(() => undefined);
