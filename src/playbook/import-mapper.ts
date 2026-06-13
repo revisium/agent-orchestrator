@@ -71,8 +71,35 @@ function hash(value: unknown): string {
   return createHash('sha256').update(stableStringify(value)).digest('hex');
 }
 
+function isSafeRowIdChar(value: string): boolean {
+  const code = value.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    value === '_' ||
+    value === '-'
+  );
+}
+
+function trimTrailingHyphens(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === '-') end -= 1;
+  return value.slice(0, end);
+}
+
 function safeRowIdPart(value: string): string {
-  const safe = value.replace(/[^A-Za-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  let safe = '';
+  let pendingHyphen = false;
+  for (const char of value) {
+    if (!isSafeRowIdChar(char) || char === '-') {
+      pendingHyphen = safe.length > 0;
+      continue;
+    }
+    if (pendingHyphen) safe += '-';
+    safe += char;
+    pendingHyphen = false;
+  }
   return safe || 'item';
 }
 
@@ -82,7 +109,7 @@ export function scopedImportRowId(playbookId: string, itemId: string): string {
 
   const digest = hash({ itemId, playbookId }).slice(0, ROW_ID_HASH_LENGTH);
   const prefixLength = ROW_ID_MAX_LENGTH - ROW_ID_HASH_LENGTH - 1;
-  const prefix = raw.slice(0, prefixLength).replace(/-+$/g, '') || 'item';
+  const prefix = trimTrailingHyphens(raw.slice(0, prefixLength)) || 'item';
   return `${prefix}-${digest}`;
 }
 
