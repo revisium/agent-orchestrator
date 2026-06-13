@@ -12,6 +12,7 @@ import { InboxService } from '../revisium/inbox.service.js';
 import { PlaybooksService } from '../revisium/playbooks.service.js';
 import { RolesService } from '../revisium/roles.service.js';
 import { RunService } from '../revisium/run.service.js';
+import { PrReadinessService, type GetPrReadinessInput } from './pr-readiness.service.js';
 
 const execFileAsync = promisify(execFile);
 const GATE_TOPICS = new Set<string>(['plan', 'merge']);
@@ -129,6 +130,7 @@ export class TaskControlPlaneApiService {
     private readonly playbooks: PlaybooksService,
     private readonly pipeline: PipelineService,
     private readonly dbos: DbosService,
+    private readonly prReadiness: PrReadinessService = new PrReadinessService(),
   ) {}
 
   async getStatus() {
@@ -478,5 +480,13 @@ export class TaskControlPlaneApiService {
         'Use create_run then start_run to execute the current DBOS developTask workflow.',
       ],
     };
+  }
+
+  getPrReadiness(input: GetPrReadinessInput) {
+    return this.prReadiness.getPrReadiness(input);
+  }
+
+  listPrFeedback(input: GetPrReadinessInput) {
+    return this.prReadiness.listPrFeedback(input);
   }
 }

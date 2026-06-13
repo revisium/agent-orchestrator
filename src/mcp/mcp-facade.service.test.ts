@@ -14,6 +14,8 @@ test('McpFacadeService.getCapabilities exposes the MCP transport surface', () =>
   assert.ok(capabilities.tools.includes('create_run'));
   assert.ok(capabilities.tools.includes('approve_gate'));
   assert.ok(capabilities.tools.includes('simulate_route'));
+  assert.ok(capabilities.tools.includes('get_pr_readiness'));
+  assert.ok(capabilities.tools.includes('list_pr_feedback'));
 });
 
 test('McpFacadeService delegates product operations to TaskControlPlaneApiService', async () => {
@@ -30,4 +32,23 @@ test('McpFacadeService delegates product operations to TaskControlPlaneApiServic
 
   assert.deepEqual(received, { title: 'Task', repo: '.', start: false });
   assert.deepEqual(result, { runId: 'run-1', started: false });
+});
+
+test('McpFacadeService delegates PR readiness tools to TaskControlPlaneApiService', async () => {
+  const calls: string[] = [];
+  const api = {
+    async getPrReadiness() {
+      calls.push('getPrReadiness');
+      return { verdict: 'ready' };
+    },
+    async listPrFeedback() {
+      calls.push('listPrFeedback');
+      return { developerFixes: [] };
+    },
+  } as unknown as TaskControlPlaneApiService;
+  const facade = new McpFacadeService(api);
+
+  assert.deepEqual(await facade.getPrReadiness({ repo: 'owner/repo', prNumber: 1 }), { verdict: 'ready' });
+  assert.deepEqual(await facade.listPrFeedback({ repo: 'owner/repo', prNumber: 1 }), { developerFixes: [] });
+  assert.deepEqual(calls, ['getPrReadiness', 'listPrFeedback']);
 });

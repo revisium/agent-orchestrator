@@ -162,4 +162,28 @@ export class McpFacadeService {
   simulateRoute(input: { title: string; repo?: string; pipeline?: string; live?: boolean }) {
     return this.api.simulateRoute(input);
   }
+
+  getPrReadiness(input: {
+    repo: string;
+    prNumber?: number;
+    headBranch?: string;
+    baseBranch?: string;
+    sonarProject?: string;
+    includeComments?: boolean;
+    includeReviewThreads?: boolean;
+  }) {
+    return this.api.getPrReadiness(input);
+  }
+
+  listPrFeedback(input: {
+    repo: string;
+    prNumber?: number;
+    headBranch?: string;
+    baseBranch?: string;
+    sonarProject?: string;
+    includeComments?: boolean;
+    includeReviewThreads?: boolean;
+  }) {
+    return this.api.listPrFeedback(input);
+  }
 }

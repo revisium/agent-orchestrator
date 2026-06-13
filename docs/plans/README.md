@@ -41,3 +41,4 @@ reference docs in [`../`](../) (the durable *what / why*).
 | [0009-playbook-install](./0009-playbook-install.md) | Ready to execute |
 | [0011-mcp-task-control-plane](./0011-mcp-task-control-plane.md) | Implemented in this PR |
 | [0012-mcp-api-service-boundary](./0012-mcp-api-service-boundary.md) | Implemented in this PR |
+| [0013-mcp-pr-readiness](./0013-mcp-pr-readiness.md) | Implemented in this PR |
