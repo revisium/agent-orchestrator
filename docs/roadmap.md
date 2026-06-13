@@ -38,6 +38,7 @@ two-process Postgres, human gates — a single run from `run create` to an open 
 | [0006 — End-to-end MVP](./plans/0006-end-to-end-mvp.md) | **Landed** | one `revo` command boot→run→PR; dogfood; rewrite getting-started |
 | [0007 — Publishable alpha](./plans/0007-publishable-alpha.md) | **Landed** | `@revisium/orchestrator` packaging + seed test (PR #35) |
 | [0008 — Alpha hardening](./plans/0008-alpha-hardening.md) | **Landed** | gh-account pinning, failure surfacing, per-attempt observability, params-as-data (PR #37) |
+| [0009 — Playbook install](./plans/0009-playbook-install.md) | **Ready to execute** | Stage: D1-enabling; `revo playbook install` imports `@revisium/agent-playbook` catalogs as versioned meaning data; workflow-as-data remains later |
 
 Plan files under [docs/plans/](./plans/) keep their original authoring status headers (Draft, or "Landed —
 retrospective record" for 0007/0008, which were documented after execution); this table is the source of truth
@@ -66,9 +67,8 @@ Slices 0001–0008 predate the ladder and are untagged. See [vision.md](./vision
 
 ## After MVP (not scheduled yet)
 
-- **Playbook import:** `revo playbook install` reading `@revisium/agent-playbook` catalogs — playbooks as named,
-  versioned sets of roles + pipelines + policies (see [vision.md](./vision.md) glossary). Positioned between D1
-  and D2 on the ladder.
+- **Playbook import:** Plan 0009 adds `revo playbook install` for local/package catalog import. Remaining follow-up:
+  remote source resolution and using imported pipelines for route proposal/workflow-as-data.
 - **Front-door adapters:** REST API (read-only dashboard first) + MCP server, over the same core. The MCP entry
   gates D2.
 - **Workflow as data:** a generic "execute plan" DBOS workflow that reads the next steps from Revisium —

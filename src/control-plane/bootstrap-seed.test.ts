@@ -163,6 +163,22 @@ test('seed (0008 #5): roles schema declares timeout_ms + permission_mode', () =>
   assert.ok('permission_mode' in props, 'roles.permission_mode must be declared');
 });
 
+test('seed (0009): playbook import schema is declared as versioned meaning', () => {
+  const playbooks = tableProps('playbooks');
+  const pipelines = tableProps('pipelines');
+  const roles = tableProps('roles');
+
+  for (const field of ['source', 'version', 'schema_version', 'catalog_hash']) {
+    assert.ok(field in playbooks, `playbooks.${field} must be declared`);
+  }
+  for (const field of ['playbook_id', 'pipeline_id', 'execution_policy_json']) {
+    assert.ok(field in pipelines, `pipelines.${field} must be declared`);
+  }
+  for (const field of ['playbook_id', 'playbook_role_id', 'source_path', 'source_hash', 'surface', 'rights']) {
+    assert.ok(field in roles, `roles.${field} must be declared`);
+  }
+});
+
 test('seed (0008 #5): loadRole surfaces per-role timeout_ms + permission_mode', async () => {
   const architect = await loadRole('architect', transport);
   assert.equal(architect.timeoutMs, 1200000, 'architect timeout_ms must resolve from the seed');

@@ -466,6 +466,36 @@
             "default": "",
             "description": "Serialized JSON"
           },
+          "playbook_id": {
+            "type": "string",
+            "default": "",
+            "description": "Installed playbook row id that supplied this role"
+          },
+          "playbook_role_id": {
+            "type": "string",
+            "default": "",
+            "description": "Original role id inside the installed playbook"
+          },
+          "source_path": {
+            "type": "string",
+            "default": "",
+            "description": "Role source path inside the installed playbook"
+          },
+          "source_hash": {
+            "type": "string",
+            "default": "",
+            "description": "Hash of the installed prompt source"
+          },
+          "surface": {
+            "type": "string",
+            "default": "",
+            "description": "Playbook role surface"
+          },
+          "rights": {
+            "type": "string",
+            "default": "",
+            "description": "Playbook role rights"
+          },
           "timeout_ms": {
             "type": "number",
             "default": 0,
@@ -475,6 +505,136 @@
             "type": "string",
             "default": "",
             "description": "claude --permission-mode; '' = default (0008 #5)"
+          },
+          "updated_at": {
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "id": "playbooks",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "default": ""
+          },
+          "package_name": {
+            "type": "string",
+            "default": ""
+          },
+          "source": {
+            "type": "string",
+            "default": ""
+          },
+          "version": {
+            "type": "string",
+            "default": ""
+          },
+          "schema_version": {
+            "type": "number",
+            "default": 0
+          },
+          "manifest_path": {
+            "type": "string",
+            "default": ""
+          },
+          "roles_catalog_path": {
+            "type": "string",
+            "default": ""
+          },
+          "pipelines_catalog_path": {
+            "type": "string",
+            "default": ""
+          },
+          "catalog_hash": {
+            "type": "string",
+            "default": ""
+          },
+          "installed_at": {
+            "type": "string",
+            "default": ""
+          },
+          "updated_at": {
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "id": "pipelines",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "default": ""
+          },
+          "playbook_id": {
+            "type": "string",
+            "default": ""
+          },
+          "pipeline_id": {
+            "type": "string",
+            "default": ""
+          },
+          "path": {
+            "type": "string",
+            "default": ""
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "required_roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "alternative_roles_json": {
+            "type": "string",
+            "default": "",
+            "description": "Serialized JSON"
+          },
+          "optional_roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "route_gates": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "platform_invocation": {
+            "type": "string",
+            "default": ""
+          },
+          "execution_policy_json": {
+            "type": "string",
+            "default": "",
+            "description": "Serialized JSON"
           },
           "updated_at": {
             "type": "string",

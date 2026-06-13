@@ -55,7 +55,7 @@ See [architecture-overview.md](./architecture-overview.md) and
 ```bash
 ./bin/revo.js revisium start     # first run ~60–120s (downloads embedded PostgreSQL); later ~8s
 ./bin/revo.js revisium status    # running on http://localhost:<resolvedPort> — health OK
-./bin/revo.js bootstrap --commit # creates the 10 control-plane tables, seeds fixed roles/profiles, and commits
+./bin/revo.js bootstrap --commit # creates the 12 control-plane tables, seeds fixed roles/profiles, and commits
 ```
 
 **Ports:** preferred HTTP `19222` / pg `15440`. If busy, the CLI scans upward and `start` prints
@@ -66,6 +66,16 @@ On first boot the host will also create the `dbos` database automatically (idemp
 `bootstrap --commit` also seeds the fixed roles (`architect`, `developer`, `reviewer`, `integrator`)
 and the three `model_profiles` (`deep`, `standard`, `cheap`). This is what lets the very first
 `run create --start` resolve `loadRole` and run the pipeline without error.
+
+To import the canonical playbook catalogs as versioned control-plane data:
+
+```bash
+./bin/revo.js playbook install ../agents --dry-run
+./bin/revo.js playbook install ../agents --commit
+```
+
+This installs playbook, role, and pipeline metadata for later route proposal and workflow-as-data work. The current
+MVP workflow still executes the DBOS `developTask` code path.
 
 **Re-running `bootstrap --commit`** is safe: it is create-or-skip (identical rows are silently
 skipped, no duplicates). It is NOT an update — if you later edit a seeded row in Revisium and

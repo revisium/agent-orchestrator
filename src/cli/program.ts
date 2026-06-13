@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { registerBootstrap } from './commands/bootstrap.js';
 import { registerDev } from './commands/dev.js';
 import { registerInbox } from './commands/inbox.js';
+import { registerPlaybook } from './commands/playbook.js';
 import { registerRevisium } from './commands/revisium.js';
 import { registerRun } from './commands/run.js';
 import { registerWork } from './commands/work.js';
@@ -38,6 +39,7 @@ export function buildProgram(app?: INestApplicationContext): Command {
     .version(readPackageVersion(), '-v, --version', 'Print the revo version');
   registerRevisium(program);
   registerBootstrap(program);
+  registerPlaybook(program);
   registerRun(program, app);
   registerWork(program);
   registerInbox(program, app); // G6: forward app so gate resolve path can access DbosService

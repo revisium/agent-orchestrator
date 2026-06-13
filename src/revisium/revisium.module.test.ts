@@ -3,7 +3,7 @@
  *
  * Tests:
  *  - NestFactory.createApplicationContext(RevisiumModule) succeeds (host-free, no DBOS).
- *  - RolesService, RunService, InboxService resolve and are defined.
+ *  - RolesService, RunService, InboxService, PlaybooksService resolve and are defined.
  *  - REVISIUM_TRANSPORT_DRAFT and REVISIUM_TRANSPORT_HEAD tokens resolve with correct mode.
  *  - Module construction makes NO network call (context creation succeeds without a live daemon).
  *  - Invariant #4 guard (§5.8): (a) no src/cli/* imports @revisium/client;
@@ -28,6 +28,7 @@ test('RevisiumModule creates a standalone context and provides all services with
   const { RolesService } = await import('./roles.service.js');
   const { RunService } = await import('./run.service.js');
   const { InboxService } = await import('./inbox.service.js');
+  const { PlaybooksService } = await import('./playbooks.service.js');
   const { REVISIUM_TRANSPORT_DRAFT, REVISIUM_TRANSPORT_HEAD } = await import('./tokens.js');
 
   const ctx = await NestFactory.createApplicationContext(RevisiumModule, { logger: false });
@@ -37,10 +38,12 @@ test('RevisiumModule creates a standalone context and provides all services with
     const rolesService = ctx.get(RolesService);
     const runService = ctx.get(RunService);
     const inboxService = ctx.get(InboxService);
+    const playbooksService = ctx.get(PlaybooksService);
 
     assert.ok(rolesService instanceof RolesService, 'RolesService must be injectable');
     assert.ok(runService instanceof RunService, 'RunService must be injectable');
     assert.ok(inboxService instanceof InboxService, 'InboxService must be injectable');
+    assert.ok(playbooksService instanceof PlaybooksService, 'PlaybooksService must be injectable');
 
     // Transport tokens must resolve to objects with a `mode` property.
     const draftTransport = ctx.get<{ mode: string }>(REVISIUM_TRANSPORT_DRAFT);
@@ -124,6 +127,7 @@ const BASELINE_IMPORTERS = new Set([
   srcPath('control-plane', 'client-transport.ts'),
   srcPath('control-plane', 'data-access.ts'),
   srcPath('control-plane', 'steps.ts'),
+  srcPath('control-plane', 'versioned-meaning.ts'),
   srcPath('run', 'inspect-run.ts'),
   // Named legacy exception (§3.9): worker loop, slated for deletion (ADR-0001).
   srcPath('worker', 'build-context.ts'),

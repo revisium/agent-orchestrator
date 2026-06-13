@@ -38,3 +38,4 @@ reference docs in [`../`](../) (the durable *what / why*).
 | [0006-end-to-end-mvp](./0006-end-to-end-mvp.md) | Draft |
 | [0007-publishable-alpha](./0007-publishable-alpha.md) | Landed (retrospective record) |
 | [0008-alpha-hardening](./0008-alpha-hardening.md) | Landed (retrospective record) |
+| [0009-playbook-install](./0009-playbook-install.md) | Ready to execute |
