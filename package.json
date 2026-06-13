@@ -1,6 +1,6 @@
 {
   "name": "@revisium/orchestrator",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.0",
   "type": "module",
   "engines": {
     "node": ">=24.11.1 <25"
