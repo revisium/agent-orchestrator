@@ -17,6 +17,15 @@ const runnerModeSchema = z.enum(['script', 'live']).optional().describe('script 
 const runIdSchema = z.string().min(1).describe('Run ID');
 const inboxIdSchema = z.string().min(1).describe('Inbox item ID');
 const limitSchema = z.number().int().positive().max(500).optional();
+const prReadinessInputSchema = {
+  repo: z.string().min(1).describe('GitHub repository in owner/name form, for example revisium/agent-orchestrator'),
+  prNumber: z.number().int().positive().optional(),
+  headBranch: z.string().min(1).optional(),
+  baseBranch: z.string().min(1).optional().default('master'),
+  sonarProject: z.string().min(1).optional(),
+  includeComments: z.boolean().optional().default(true),
+  includeReviewThreads: z.boolean().optional().default(true),
+};
 
 export function registerRevoMcpTools(server: McpServer, facade: McpFacadeService): void {
   server.registerTool(
@@ -394,5 +403,25 @@ export function registerRevoMcpTools(server: McpServer, facade: McpFacadeService
       annotations: { readOnlyHint: true },
     },
     (input) => json(facade.simulateRoute(input)),
+  );
+
+  server.registerTool(
+    'get_pr_readiness',
+    {
+      description: 'Return normalized read-only PR readiness from GitHub checks, reviews, review threads, provider comments, and optional Sonar data.',
+      inputSchema: prReadinessInputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => json(await facade.getPrReadiness(input)),
+  );
+
+  server.registerTool(
+    'list_pr_feedback',
+    {
+      description: 'Return the actionable PR feedback queue grouped by developer fixes, reviewer questions, provider waits, human decisions, ignored noise, and residual risks.',
+      inputSchema: prReadinessInputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => json(await facade.listPrFeedback(input)),
   );
 }

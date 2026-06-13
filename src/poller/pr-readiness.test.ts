@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { run, defaultFetchSonar, type PollInput, type ExecGhFn, type FetchSonarFn, type SonarResult } from './pr-readiness.js';
+import { collectPrReadiness } from './pr-readiness-core.js';
 import { BASE_STEP } from '../worker/test-fixtures.js';
 
 // ─── fixtures ────────────────────────────────────────────────
@@ -44,6 +45,7 @@ function makeFullResponses(
   comments: unknown[] = [],
   issueComments: unknown[] = [],
   prList: unknown[] | null = null,
+  reviewThreads: unknown = reviewThreadsResponse([]),
 ) {
   const fn: ExecGhFn = (args) => {
     const key = args.join(' ');
@@ -52,12 +54,45 @@ function makeFullResponses(
       return JSON.stringify(prList);
     }
     if (key.includes('statusCheckRollup')) return JSON.stringify(prView);
+    if (key.includes('api graphql')) return JSON.stringify(reviewThreads);
     if (key.includes('reviews')) return JSON.stringify(reviews);
     if (key.includes('issues') && key.includes('comments')) return JSON.stringify(issueComments);
     if (key.includes('comments')) return JSON.stringify(comments);
     throw new Error(`Unexpected gh call: ${key}`);
   };
   return fn;
+}
+
+function reviewThreadsResponse(nodes: unknown[]) {
+  return {
+    repository: {
+      pullRequest: {
+        reviewThreads: {
+          nodes,
+        },
+      },
+    },
+  };
+}
+
+function reviewThreadNode(extra: Record<string, unknown> = {}) {
+  return {
+    id: 'thread-1',
+    isResolved: false,
+    isOutdated: false,
+    path: 'src/poller/pr-readiness-core.ts',
+    line: 666,
+    comments: {
+      nodes: [
+        {
+          body: 'Please fetch review threads before returning from this path.',
+          url: 'https://github.com/owner/repo/pull/42#discussion_r1',
+          author: { login: 'reviewer' },
+        },
+      ],
+    },
+    ...extra,
+  };
 }
 
 // ─── tests ───────────────────────────────────────────────────
@@ -375,6 +410,57 @@ test('draft PR at poll_count === maxPolls: needsHuman with a draft lesson', asyn
   assert.ok(result.lesson && result.lesson.length > 0, 'a non-empty lesson must be present');
   assert.match(result.lesson!, /still a draft/);
   assert.match(result.lesson!, new RegExp(String(input.poll_count)), 'lesson references the poll count');
+});
+
+test('MCP readiness: draft path includes fetched unresolved review threads by default', async () => {
+  const draftView = prViewResponse([checkRun('Gitar', 'COMPLETED', 'SUCCESS')], {
+    number: 42,
+    state: 'OPEN',
+    isDraft: true,
+  });
+  const execGh = makeFullResponses(
+    draftView,
+    [],
+    [],
+    [],
+    null,
+    reviewThreadsResponse([reviewThreadNode()]),
+  );
+
+  const readiness = await collectPrReadiness({ repo: 'owner/repo', prNumber: 42 }, execGh);
+
+  assert.equal(readiness.verdict, 'waiting');
+  assert.equal(readiness.pr.draft, true);
+  assert.equal(readiness.reviewThreads.included, true);
+  assert.equal(readiness.reviewThreads.unresolvedCount, 1);
+  assert.equal(readiness.reviewThreads.items[0]?.id, 'thread-1');
+  assert.equal(readiness.feedback.developerFixes[0]?.source, 'review_thread');
+  assert.match(readiness.feedback.developerFixes[0]?.summary ?? '', /fetch review threads/);
+});
+
+test('MCP readiness: pending path includes fetched unresolved review threads by default', async () => {
+  const pendingView = prViewResponse([checkRun('Gitar', 'IN_PROGRESS')], {
+    number: 42,
+    state: 'OPEN',
+  });
+  const execGh = makeFullResponses(
+    pendingView,
+    [],
+    [],
+    [],
+    null,
+    reviewThreadsResponse([reviewThreadNode({ id: 'thread-2' })]),
+  );
+
+  const readiness = await collectPrReadiness({ repo: 'owner/repo', prNumber: 42 }, execGh);
+
+  assert.equal(readiness.verdict, 'waiting');
+  assert.equal(readiness.nextAction, 'watcher_wait');
+  assert.equal(readiness.reviewThreads.included, true);
+  assert.equal(readiness.reviewThreads.unresolvedCount, 1);
+  assert.equal(readiness.reviewThreads.items[0]?.id, 'thread-2');
+  assert.equal(readiness.feedback.developerFixes[0]?.source, 'review_thread');
+  assert.match(readiness.feedback.developerFixes[0]?.summary ?? '', /fetch review threads/);
 });
 
 test('unknown __typename node: terminal but never counted as passed (fails closed)', async () => {
@@ -820,4 +906,30 @@ test('FIX5: not-found gh pr view error + head_branch → recovers to branch PR',
   assert.equal(result.needsHuman, undefined, 'not-found error recovered via head_branch');
   assert.equal(result.nextSteps[0]?.role, 'ci-poller');
   assert.equal((result.nextSteps[0]?.input as PollInput).pr_number, 77, 'recovered pr_number forwarded');
+});
+
+test('MCP readiness: CodeRabbit success plus provider-limit comment is waiting/provider_limit', async () => {
+  const terminalView = prViewResponse([
+    checkRun('Gitar', 'COMPLETED', 'SUCCESS'),
+    statusCtx('CodeRabbit', 'SUCCESS'),
+  ], { number: 42, state: 'OPEN', url: 'https://github.com/owner/repo/pull/42' });
+  const issueComments = [
+    {
+      user: { login: 'coderabbitai[bot]', type: 'Bot' },
+      body: 'Review did not start because the provider rate limit was reached. Please wait and retry later.',
+    },
+  ];
+  const execGh = makeFullResponses(terminalView, [], [], issueComments);
+
+  const readiness = await collectPrReadiness(
+    { repo: 'owner/repo', prNumber: 42, includeReviewThreads: false },
+    execGh,
+  );
+
+  assert.equal(readiness.verdict, 'waiting');
+  assert.equal(readiness.nextAction, 'watcher_wait');
+  assert.equal(readiness.providerState.codeRabbit?.reason, 'provider_limit');
+  assert.equal(readiness.providerState.codeRabbit?.state, 'waiting');
+  assert.equal(readiness.feedback.providerWait[0]?.provider, 'CodeRabbit');
+  assert.match(readiness.evidence.join('\n'), /CodeRabbit provider\/rate limit/);
 });

@@ -29,6 +29,8 @@ export const MCP_TOOL_NAMES = [
   'list_pipelines',
   'get_pipeline',
   'simulate_route',
+  'get_pr_readiness',
+  'list_pr_feedback',
 ] as const;
 
 export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
@@ -40,6 +42,7 @@ Use these tools to manage tasks end-to-end from your coding agent:
 - inspect run status, events, attempts, and digests;
 - resolve human inbox gates and questions;
 - inspect installed playbooks, roles, and pipelines;
+- inspect PR readiness and actionable review feedback before resuming work;
 - validate repository context before starting live work.
 
 This MCP server is local stdio only and does not expose generic Revisium table CRUD.
