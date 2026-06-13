@@ -4,8 +4,8 @@
 > not yet implemented.** **Today** `steps` and `attempts` are still core to the runtime (`src/control-plane/
 > tables.ts`, `steps.ts`, the worker loop) — they are *not* removed yet. **The target:** execution progress moves
 > out of Revisium into DBOS's own Postgres, and `steps`/`attempts` (with their lease/recover/backoff fields) are
-> dropped in the post-MVP cleanup after slices 0001–0006 land. What stays in Revisium either way: `roles`,
-> `model_profiles`, `routing_policy` (versioned), and `tasks`, `task_runs`, `events`, `inbox`, `cost_ledger`
+> dropped in the post-MVP cleanup after slices 0001–0006 land. What stays in Revisium either way: `playbooks`,
+> `roles`, `pipelines`, `model_profiles`, `routing_policy` (versioned), and `tasks`, `task_runs`, `events`, `inbox`, `cost_ledger`
 > (runtime, draft). Read the `steps`/`attempts` sections below as describing the current-but-to-be-retired tables.
 
 > **Status: verified.** The source of truth for the schema is `control-plane/bootstrap.config.json`; this doc is
@@ -14,13 +14,15 @@
 > `control-plane/bootstrap.config.json` (authoritative schema).
 > **Realized by:** [plans/0001-revisium-daemon-and-bootstrap.md](./plans/0001-revisium-daemon-and-bootstrap.md).
 
-The control plane is one Revisium project (`admin/control-plane/master`) — the "exchange bus." Ten tables.
+The control plane is one Revisium project (`admin/control-plane/master`) — the "exchange bus." Twelve tables.
 
 ## Versioned vs. runtime (the boundary, per table)
 
 | Table | Class | Revision behavior |
 | --- | --- | --- |
+| `playbooks` | **Versioned** | edited via commit; route/import reads committed `head` |
 | `roles` | **Versioned** | edited via commit; loop reads committed `head` |
+| `pipelines` | **Versioned** | edited via commit; future route/workflow reads committed `head` |
 | `model_profiles` | **Versioned** | edited via commit; loop reads `head` |
 | `routing_policy` | **Versioned** | edited via commit; loop reads `head` |
 | `task_runs` | Runtime | draft writes, never committed |
@@ -77,8 +79,21 @@ status (pending|resolved), answer, resolved_by, created_at, resolved_at` · Glob
 
 ### `roles` — role definitions (VERSIONED)
 `id, name (architect|developer|reviewer|integrator|ci-poller|pr-watcher), system_prompt, model_level (cheap|standard|deep),
-effort, runner (claude-code|codex|script), allowed_tools[], scope_rules, updated_at`
+effort, runner (claude-code|codex|script), allowed_tools[], scope_rules, playbook_id, playbook_role_id,
+source_path, source_hash, surface, rights, updated_at`
 `scope_rules` stores serialized JSON.
+Executable runtime roles keep their existing bare row ids. Imported playbook role snapshots use playbook-scoped row
+ids, for example `<playbook-id>/<role-id>`, so installing a playbook does not replace the current MVP execution
+prompts or tool permissions.
+
+### `playbooks` — installed playbook metadata (VERSIONED)
+`id, name, package_name, source, version, schema_version, manifest_path, roles_catalog_path,
+pipelines_catalog_path, catalog_hash, installed_at, updated_at`
+
+### `pipelines` — imported pipeline definitions (VERSIONED)
+`id, playbook_id, pipeline_id, path, triggers[], required_roles[], alternative_roles_json, optional_roles[],
+route_gates[], platform_invocation, execution_policy_json, updated_at`
+`alternative_roles_json` and `execution_policy_json` store serialized JSON.
 
 ### `model_profiles` — level → real model (VERSIONED)
 `id, level (cheap|standard|deep), provider, model_id, params, cost_per_input, cost_per_output, updated_at` ·

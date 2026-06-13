@@ -13,6 +13,13 @@ test('readPackageVersion: returns the version from package.json (not a hardcoded
   assert.equal(readPackageVersion(), expectedVersion());
 });
 
+test('buildProgram: registers playbook install command', () => {
+  const program = buildProgram();
+  const playbook = program.commands.find((cmd) => cmd.name() === 'playbook');
+  assert.ok(playbook, 'playbook command must be registered');
+  assert.ok(playbook.commands.some((cmd) => cmd.name() === 'install'), 'playbook install must be registered');
+});
+
 for (const flag of ['--version', '-v']) {
   test(`buildProgram: ${flag} prints the package.json version and exits via commander`, () => {
     const program = buildProgram().exitOverride();

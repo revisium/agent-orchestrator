@@ -9,6 +9,12 @@ export type Role = {
   runner: 'claude-code' | 'codex' | 'script';
   allowedTools: string[];
   scopeRules: unknown;
+  playbookId?: string;
+  playbookRoleId?: string;
+  sourcePath?: string;
+  sourceHash?: string;
+  surface?: string;
+  rights?: string;
   /** Per-role agent timeout (0008 #5 — data, not a hardcoded const). undefined → runner default. */
   timeoutMs?: number;
   /** Per-role claude `--permission-mode` (0008 #5). undefined → 'default'. */
@@ -106,6 +112,12 @@ export async function loadRole(name: string, transport?: ControlPlaneTransport):
     runner: (toStr(d.runner) || 'claude-code') as Role['runner'],
     allowedTools: Array.isArray(d.allowed_tools) ? (d.allowed_tools as unknown[]).map(toStr) : [],
     scopeRules: parseJsonField(d.scope_rules),
+    playbookId: toStr(d.playbook_id) || undefined,
+    playbookRoleId: toStr(d.playbook_role_id) || undefined,
+    sourcePath: toStr(d.source_path) || undefined,
+    sourceHash: toStr(d.source_hash) || undefined,
+    surface: toStr(d.surface) || undefined,
+    rights: toStr(d.rights) || undefined,
     timeoutMs: toOptPosInt(d.timeout_ms),
     permissionMode: toStr(d.permission_mode) || undefined,
   };

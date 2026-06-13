@@ -4,6 +4,7 @@ import { REVISIUM_TRANSPORT_DRAFT, REVISIUM_TRANSPORT_HEAD } from './tokens.js';
 import { RolesService } from './roles.service.js';
 import { RunService } from './run.service.js';
 import { InboxService } from './inbox.service.js';
+import { PlaybooksService } from './playbooks.service.js';
 
 /**
  * RevisiumModule — provides draft + head transport tokens, RolesService, RunService, InboxService.
@@ -30,6 +31,7 @@ import { InboxService } from './inbox.service.js';
     RolesService,
     RunService,
     InboxService,
+    PlaybooksService,
   ],
   exports: [
     REVISIUM_TRANSPORT_DRAFT,
@@ -37,6 +39,7 @@ import { InboxService } from './inbox.service.js';
     RolesService,
     RunService,
     InboxService,
+    PlaybooksService,
   ],
 })
 export class RevisiumModule {}
