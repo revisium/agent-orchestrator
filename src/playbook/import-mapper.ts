@@ -104,8 +104,14 @@ function safeRowIdPart(value: string): string {
 }
 
 export function scopedImportRowId(playbookId: string, itemId: string): string {
-  const raw = `${safeRowIdPart(playbookId)}-${safeRowIdPart(itemId)}`;
-  if (raw.length <= ROW_ID_MAX_LENGTH) return raw;
+  const safePlaybookId = safeRowIdPart(playbookId);
+  const safeItemId = safeRowIdPart(itemId);
+  const raw = `${safePlaybookId}-${safeItemId}`;
+  const needsHash =
+    raw.length > ROW_ID_MAX_LENGTH ||
+    safePlaybookId !== playbookId ||
+    safeItemId !== itemId;
+  if (!needsHash) return raw;
 
   const digest = hash({ itemId, playbookId }).slice(0, ROW_ID_HASH_LENGTH);
   const prefixLength = ROW_ID_MAX_LENGTH - ROW_ID_HASH_LENGTH - 1;

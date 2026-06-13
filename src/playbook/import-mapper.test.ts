@@ -13,9 +13,13 @@ test('runtimeRoleName: maps watcher to current pr-watcher runtime name', () => {
 });
 
 test('scopedImportRowId: returns Revisium-safe scoped row ids', () => {
+  assert.equal(scopedImportRowId('pb', 'developer-backend'), 'pb-developer-backend');
+
   const rowId = scopedImportRowId('pb/name', 'developer/backend');
-  assert.equal(rowId, 'pb-name-developer-backend');
+  assert.match(rowId, /^pb-name-developer-backend-[a-f0-9]{12}$/);
   assert.match(rowId, /^[A-Za-z0-9_-]+$/);
+
+  assert.notEqual(scopedImportRowId('pb', 'developer/backend'), scopedImportRowId('pb', 'developer-backend'));
 
   const longRowId = scopedImportRowId(
     'very-long-playbook-name-that-keeps-going',
@@ -23,6 +27,7 @@ test('scopedImportRowId: returns Revisium-safe scoped row ids', () => {
   );
   assert.ok(longRowId.length <= 64);
   assert.match(longRowId, /^[A-Za-z0-9_-]+$/);
+  assert.match(longRowId, /-[a-f0-9]{12}$/);
 });
 
 test('mapPlaybookRows: maps roles and pipelines into versioned rows', () => {
