@@ -145,6 +145,31 @@ Live run: a real draft PR URL.
 
 Requires `gh` auth and a clean target repo (preflight blocks a dirty repo).
 
+## MCP entry
+
+`revo mcp` starts the local stdio MCP server. It is meant to be launched by a
+local MCP-capable agent, not by a browser:
+
+```json
+{
+  "mcpServers": {
+    "revo": {
+      "command": "/path/to/agent-orchestrator/bin/revo.js",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The MCP server has no auth because it is local stdio only. It exposes product
+tools for task development control: health, repository diagnostics, run
+create/start/resume/cancel, run digests, inbox gate approval/rejection,
+playbook install/discovery, role/pipeline discovery, and route simulation.
+
+It does not expose generic Revisium table CRUD. Use the product tools so the
+same Nest/DBOS/Revisium core owns workflow starts, gate signals, and data-access
+boundaries.
+
 ## Where state lives
 
 ```text

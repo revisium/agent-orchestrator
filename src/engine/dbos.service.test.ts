@@ -96,6 +96,18 @@ test('DbosService: setConfig passes systemDatabaseUrl field (confirmed SDK field
   }
 });
 
+test('DbosService: setConfig forwards logLevel for stdio-safe host modes', async () => {
+  const recorded = patchDbos({});
+  try {
+    const { DbosService } = await import('./dbos.service.js');
+    const svc = new DbosService();
+    svc.setConfig('postgresql://revisium:password@localhost:15440/dbos', { logLevel: 'warn' });
+    assert.equal(recorded.config?.logLevel, 'warn');
+  } finally {
+    restoreDbos();
+  }
+});
+
 test('DbosService: launch() is idempotent — second call is a no-op (E6)', async () => {
   let launchCallCount = 0;
   patchDbos({ launch: async () => { launchCallCount += 1; } });

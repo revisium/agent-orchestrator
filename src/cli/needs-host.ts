@@ -6,6 +6,7 @@
  *   - run start (slice 0003 — enqueues a DBOS workflow, needs the host)
  *   - run create --start (slice 0006 — enqueues immediately after create, needs the host)
  *   - inbox resolve --approve|--reject (slice 0004 — signals a parked workflow, needs DBOS)
+ *   - mcp (local stdio MCP server over the host services)
  *
  * All other run subcommands (create/list/show/events/cancel) remain host-free.
  * `run create` WITHOUT --start stays host-free.
@@ -25,13 +26,23 @@
  */
 
 /** Commands that require the Nest/DBOS host context (colon-style, no subcommand needed). */
-const HOST_COMMANDS = new Set(['dev:ping', 'dev:status']);
+const HOST_COMMANDS = new Set(['dev:ping', 'dev:status', 'mcp']);
 
 /** Flags that force host-free regardless of the command. */
 const HELP_FLAGS = new Set(['--help', '-h', '--version', '-v']);
 
 /** Gate-resolve flags that make `inbox resolve` host-requiring (0004). */
 const GATE_FLAGS = new Set(['--approve', '--reject']);
+
+function firstCommand(args: string[]): string | undefined {
+  return args.find((a) => !a.startsWith('-'));
+}
+
+export function isMcpCommand(argv: string[]): boolean {
+  const args = argv.slice(2);
+  if (args.some((a) => HELP_FLAGS.has(a))) return false;
+  return firstCommand(args) === 'mcp';
+}
 
 /**
  * Decide whether an argv array needs the Nest host context.
@@ -44,7 +55,7 @@ export function needsHost(argv: string[]): boolean {
   if (args.some((a) => HELP_FLAGS.has(a))) return false;
 
   // Find the first non-flag argument (the command name).
-  const command = args.find((a) => !a.startsWith('-'));
+  const command = firstCommand(args);
   if (!command) return false;
 
   // M5: `run start` is host-requiring; all other `run` subcommands are host-free.

@@ -19,6 +19,10 @@ import { DbosService } from '../engine/dbos.service.js';
 import { ensureRevisium, readPostmasterPgPort } from './ensure-revisium.js';
 import { dbosSystemDatabaseUrl, ensurePostgres } from '../engine/ensure-postgres.js';
 
+function isMcpStdioHost(): boolean {
+  return process.env.REVO_MCP_STDIO === '1';
+}
+
 @Injectable()
 export class HostLifecycle implements OnApplicationBootstrap, OnApplicationShutdown {
   constructor(private readonly dbosService: DbosService) {}
@@ -49,7 +53,9 @@ export class HostLifecycle implements OnApplicationBootstrap, OnApplicationShutd
     await ensurePostgres(provenPgPort);
 
     // Step 4+5: Configure + launch DBOS.
-    this.dbosService.setConfig(dbosSystemDatabaseUrl(provenPgPort));
+    this.dbosService.setConfig(dbosSystemDatabaseUrl(provenPgPort), {
+      logLevel: isMcpStdioHost() ? 'warn' : undefined,
+    });
     await this.dbosService.launch();
   }
 
