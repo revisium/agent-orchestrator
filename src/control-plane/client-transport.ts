@@ -17,7 +17,7 @@ export type TransportRow = {
 };
 
 export type TransportList = {
-  edges?: Array<{ node?: TransportRow }>;
+  edges?: Array<{ cursor?: string; node?: TransportRow }>;
 };
 
 export type ControlPlaneTransport = {
@@ -150,7 +150,10 @@ export function createClientTransport(mode: RevisionMode): ControlPlaneTransport
     };
     const result = await sdk.rows({ client, path: { revisionId, tableId: table }, body });
     if (result.error) throw mapApiError(result.error, `${table}/rows`);
-    const edges = (result.data?.edges ?? []).map((e: { node: { id: string; data: Record<string, unknown>; readonly?: boolean; createdAt?: string; updatedAt?: string } }) => ({ node: toTransportRow(e.node) }));
+    const edges = (result.data?.edges ?? []).map((e: {
+      cursor?: string;
+      node: { id: string; data: Record<string, unknown>; readonly?: boolean; createdAt?: string; updatedAt?: string };
+    }) => ({ cursor: e.cursor, node: toTransportRow(e.node) }));
     return { edges };
   }
 
