@@ -143,7 +143,8 @@ at live runners.
 ```bash
 ./bin/revo.js run create --title "my task" --repo . --pipeline-id local-change --start --wait
 ```
-> For installed users: `revo run create --title "my task" --repo /path/to/repo --pipeline-id local-change --start --wait`
+
+For installed users: `revo run create --title "my task" --repo /path/to/repo --pipeline-id local-change --start --wait`
 
 > WARNING: installed `runner_id` bindings such as `claude-code` may call real provider CLIs, and the real integrator
 > may push a branch and open a draft PR.

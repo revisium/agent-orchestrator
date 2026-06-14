@@ -440,7 +440,7 @@ export function makeDevelopTask(
       steps: RouteExecutionStep[],
       from: unknown,
       suffix: string,
-    ): Promise<AttemptResult> => {
+    ): Promise<{ result: AttemptResult; overBudget: boolean }> => {
       let stepInput = from;
       let lastResult: AttemptResult = { output: { verdict: 'PASS' }, nextSteps: [], costs: [] };
       for (const step of steps) {
@@ -449,8 +449,9 @@ export function makeDevelopTask(
           from: stepInput,
         });
         stepInput = lastResult.output;
+        if (overBudget()) return { result: lastResult, overBudget: true };
       }
-      return lastResult;
+      return { result: lastResult, overBudget: false };
     };
     const routePlan = planRouteExecution(route);
     const hasIntegrator = Boolean(routePlan.integrator);
@@ -492,9 +493,17 @@ export function makeDevelopTask(
       if (overBudget()) return await blockBudget();
     }
 
-    if (!planResult && !routePlan.developer) {
-      throw new Error(`ROUTE_INVALID: pipeline ${route.pipelineId} has no executable non-integrator roles`);
-    }
+    const blockPipeline = async (payload: Record<string, unknown>): Promise<DevelopResult> => {
+      await appendEvent({
+        runId,
+        taskId,
+        stepId: '',
+        stepKey: 'pipeline',
+        type: 'pipeline_blocked',
+        payload,
+      });
+      return { runId, blocked: true, iterations: iteration, verdict: 'BLOCKED', cancelled: false };
+    };
 
     const plannerOutput = planResult?.output ?? { pipeline: route.pipelineId };
     if (overBudget()) return await blockBudget();
@@ -518,19 +527,10 @@ export function makeDevelopTask(
     // ── end PLAN GATE ──────────────────────────────────────────────────────────
 
     if (!routePlan.developer) {
-      await completeRun(runId, {
-        actor: 'pipeline',
-        source: 'pipeline-complete',
-        verdict: planResult ? verdictOf(planResult) : 'PASS',
-        iterations: 0,
+      return await blockPipeline({
+        reason: 'route',
+        message: `pipeline ${route.pipelineId} has no developer role`,
       });
-      return {
-        runId,
-        blocked: false,
-        iterations: 0,
-        verdict: planResult ? verdictOf(planResult) : 'PASS',
-        cancelled: false,
-      };
     }
 
     // developer step (first pass)
@@ -541,10 +541,11 @@ export function makeDevelopTask(
     if (overBudget()) return await blockBudget();
 
     // reviewer/watch steps (first pass), preserving route order for every required binding.
-    let reviewResult = routePlan.afterDeveloper.length > 0
+    const firstReviewPass = routePlan.afterDeveloper.length > 0
       ? await runRolePass(routePlan.afterDeveloper, developerResult.output, '')
-      : { output: { verdict: 'PASS' }, nextSteps: [], costs: [] };
-    if (routePlan.afterDeveloper.length > 0 && overBudget()) return await blockBudget();
+      : { result: { output: { verdict: 'PASS' }, nextSteps: [], costs: [] }, overBudget: false };
+    let reviewResult = firstReviewPass.result;
+    if (firstReviewPass.overBudget) return await blockBudget();
 
     // bounded reviewer→developer loop (E5, E6); iteration cap is DATA (0008 #5).
     // Budget is checked after EVERY step so a hard-stop fires before the NEXT agent call burns spend.
@@ -556,8 +557,9 @@ export function makeDevelopTask(
       });
       if (overBudget()) return await blockBudget();
       if (routePlan.afterDeveloper.length === 0) break;
-      reviewResult = await runRolePass(routePlan.afterDeveloper, developerResult.output, `#${iteration}`);
-      if (overBudget()) return await blockBudget();
+      const reviewPass = await runRolePass(routePlan.afterDeveloper, developerResult.output, `#${iteration}`);
+      reviewResult = reviewPass.result;
+      if (reviewPass.overBudget) return await blockBudget();
     }
 
     // Cap exhausted — still blocking: write pipeline_blocked and stop (E6).
@@ -578,18 +580,6 @@ export function makeDevelopTask(
         cancelled: false,
       };
     }
-
-    const blockPipeline = async (payload: Record<string, unknown>): Promise<DevelopResult> => {
-      await appendEvent({
-        runId,
-        taskId,
-        stepId: '',
-        stepKey: 'pipeline',
-        type: 'pipeline_blocked',
-        payload,
-      });
-      return { runId, blocked: true, iterations: iteration, verdict: 'BLOCKED', cancelled: false };
-    };
 
     const runIntegration = async (suffix: string): Promise<IntegratorOutput | IntegratorBlocked | null> => {
       if (!hasIntegrator) return null;
@@ -625,8 +615,9 @@ export function makeDevelopTask(
     }
 
     if (integratorResult && routePlan.postIntegratorStatus.length > 0) {
-      let watcherResult = await runRolePass(routePlan.postIntegratorStatus, integratorResult, '');
-      if (overBudget()) return await blockBudget();
+      const firstWatcherPass = await runRolePass(routePlan.postIntegratorStatus, integratorResult, '');
+      let watcherResult = firstWatcherPass.result;
+      if (firstWatcherPass.overBudget) return await blockBudget();
 
       let watcherIteration = 0;
       while (isBlocking(verdictOf(watcherResult)) && watcherIteration < policy.maxReviewIterations) {
@@ -642,8 +633,9 @@ export function makeDevelopTask(
         if (integratorResult && 'needsHuman' in integratorResult) {
           return await blockPipeline({ reason: 'integrate', lesson: integratorResult.lesson });
         }
-        watcherResult = await runRolePass(routePlan.postIntegratorStatus, integratorResult, `#${watcherIteration}`);
-        if (overBudget()) return await blockBudget();
+        const watcherPass = await runRolePass(routePlan.postIntegratorStatus, integratorResult, `#${watcherIteration}`);
+        watcherResult = watcherPass.result;
+        if (watcherPass.overBudget) return await blockBudget();
       }
 
       if (isBlocking(verdictOf(watcherResult))) {

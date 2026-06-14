@@ -481,7 +481,7 @@
           },
           "runner_id": {
             "type": "string",
-            "default": "claude-code",
+            "default": "",
             "description": "Portable playbook runner binding, for example claude-code or revo-integrator"
           },
           "allowed_tools": {

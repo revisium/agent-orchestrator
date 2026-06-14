@@ -61,6 +61,7 @@ test('loadPlaybookCatalogs: validates role and pipeline records', () => {
   const catalogs = loadPlaybookCatalogs(root, manifest);
 
   assert.equal(catalogs.roles[0]?.id, 'developer');
+  assert.equal(catalogs.roles[0]?.runnerId, 'claude-code');
   assert.equal(catalogs.pipelines[0]?.id, 'feature-development');
 });
 
@@ -144,5 +145,28 @@ test('loadPlaybookCatalogs: rejects stub-agent as a production role runner', () 
   assert.throws(
     () => loadPlaybookCatalogs(root, manifest),
     /execution profile override/,
+  );
+});
+
+test('loadPlaybookCatalogs: normalizes runner_id before production-runner validation', () => {
+  const { root, manifest } = makeRoot();
+  writeFileSync(
+    join(root, 'catalog', 'roles.json'),
+    JSON.stringify([
+      {
+        id: 'developer',
+        path: 'roles/developer/ROLE.md',
+        surface: 'any',
+        rights: 'write-working-tree',
+        default_model_level: 'standard',
+        runner_id: ' stub-agent ',
+      },
+    ]),
+  );
+  writeFileSync(join(root, 'catalog', 'pipelines.json'), JSON.stringify([]));
+
+  assert.throws(
+    () => loadPlaybookCatalogs(root, manifest),
+    /runner_id must not be stub-agent/,
   );
 });

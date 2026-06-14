@@ -358,6 +358,26 @@ test('TaskControlPlaneApiService.createRun can immediately start the workflow', 
   assert.deepEqual(starts, [{ runId: 'run-1', pipelineId: 'local-change', override: 'stub-agent' }]);
 });
 
+test('TaskControlPlaneApiService.createRun persists canonical pipeline id', async () => {
+  let persistedPipelineId = '';
+  const api = makeApi({
+    runService: {
+      async createRun(input) {
+        persistedPipelineId = input.pipelineId ?? '';
+        return { runId: 'run-1', taskId: 'task-1', stepId: 'step-1', eventId: 'event-1', status: 'ready' };
+      },
+    },
+  });
+
+  await api.createRun({
+    title: 'MCP task',
+    repo: '.',
+    pipelineId: 'local-change',
+  });
+
+  assert.equal(persistedPipelineId, 'local-change');
+});
+
 test('TaskControlPlaneApiService.createRun ignores public params for runner profile selection', async () => {
   const starts: Array<{ override?: string; params: Record<string, unknown> }> = [];
   const api = makeApi({

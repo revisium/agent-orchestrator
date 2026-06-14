@@ -50,6 +50,10 @@ function stringField(record: Record<string, unknown>, key: string, context: stri
   throw new PlaybookError('PLAYBOOK_INVALID_CATALOG', `${context}.${key} must be a non-empty string`);
 }
 
+function normalizedStringField(record: Record<string, unknown>, key: string, context: string): string {
+  return stringField(record, key, context).trim();
+}
+
 function stringArrayField(record: Record<string, unknown>, key: string, context: string): string[] {
   const value = record[key];
   if (Array.isArray(value) && value.every((v) => typeof v === 'string')) return [...value];
@@ -116,7 +120,7 @@ function parseRole(value: unknown, index: number, root: string): RoleCatalogReco
   if (!existsSync(resolvedPath)) {
     throw new PlaybookError('PLAYBOOK_INVALID_CATALOG', `${context}.path does not exist: ${path}`);
   }
-  const runnerId = stringField(record, 'runner_id', context);
+  const runnerId = normalizedStringField(record, 'runner_id', context);
   if (PRODUCTION_BLOCKED_RUNNERS.has(runnerId)) {
     throw new PlaybookError(
       'PLAYBOOK_INVALID_CATALOG',

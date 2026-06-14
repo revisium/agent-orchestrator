@@ -188,6 +188,8 @@ test('completeRun: paginates related task and step status propagation beyond 500
   const steps = relatedRows('step');
   const listCalls: Array<{ table: RuntimeTable; first?: number; after?: string }> = [];
   const patches: Array<{ table: RuntimeTable; rowId: string; ops: PatchOperation[] }> = [];
+  let activePatches = 0;
+  let maxActivePatches = 0;
 
   const da: ControlPlaneDataAccess = {
     async assertReady() {},
@@ -210,7 +212,11 @@ test('completeRun: paginates related task and step status propagation beyond 500
       return { rowId, data };
     },
     async patchRow(table, rowId, ops) {
+      activePatches++;
+      maxActivePatches = Math.max(maxActivePatches, activePatches);
+      await new Promise<void>((resolve) => setImmediate(resolve));
       patches.push({ table, rowId, ops });
+      activePatches--;
       return { rowId, data: { id: rowId } };
     },
   };
@@ -229,6 +235,7 @@ test('completeRun: paginates related task and step status propagation beyond 500
   );
   assert.equal(patches.filter((patch) => patch.table === 'tasks').length, 501);
   assert.equal(patches.filter((patch) => patch.table === 'steps').length, 501);
+  assert.equal(maxActivePatches, 20, 'related-row terminal patches must be concurrency bounded');
   assert.ok(
     patches
       .filter((patch) => patch.table === 'tasks')

@@ -16,6 +16,7 @@ import { ControlPlaneError } from '../control-plane/errors.js';
 import { fnv1a64Hex } from '../control-plane/steps.js';
 
 const RELATED_ROW_PAGE_SIZE = 500;
+const RELATED_ROW_PATCH_CONCURRENCY = 20;
 
 export type TerminalRunStatus = 'cancelled' | 'failed' | 'completed';
 type TerminalStepStatus = 'skipped' | 'failed' | 'succeeded';
@@ -48,6 +49,23 @@ function isTerminalStepStatus(status: unknown): boolean {
 // Prisma path+equals accepts scalar values; the SDK types equals as an object due to generated types.
 function runIdWhere(runId: string): ListRowsOptions['where'] {
   return { data: { path: 'run_id', equals: runId as unknown as Record<string, unknown> } };
+}
+
+async function runBounded<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      const item = items[index];
+      if (item === undefined) return;
+      await worker(item);
+    }
+  });
+  await Promise.all(workers);
 }
 
 /**
@@ -107,14 +125,21 @@ export async function recordTerminalRunStatus(
       listRowsForRun('tasks'),
       listRowsForRun('steps'),
     ]);
-    await Promise.all([
+    const patches: Array<{
+      table: 'tasks' | 'steps';
+      rowId: string;
+      patch: typeof taskPatch | typeof stepPatch;
+    }> = [
       ...tasks
         .filter((task) => task.data.run_id === runId && task.data.status !== params.status)
-        .map((task) => da.patchRow('tasks', task.rowId, taskPatch)),
+        .map((task) => ({ table: 'tasks' as const, rowId: task.rowId, patch: taskPatch })),
       ...steps
         .filter((step) => step.data.run_id === runId && !isTerminalStepStatus(step.data.status) && step.data.status !== stepStatus)
-        .map((step) => da.patchRow('steps', step.rowId, stepPatch)),
-    ]);
+        .map((step) => ({ table: 'steps' as const, rowId: step.rowId, patch: stepPatch })),
+    ];
+    await runBounded(patches, RELATED_ROW_PATCH_CONCURRENCY, async (patch) => {
+      await da.patchRow(patch.table, patch.rowId, patch.patch);
+    });
   }
 
   async function patchTerminalRows(): Promise<void> {

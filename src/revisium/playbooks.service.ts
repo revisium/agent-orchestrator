@@ -44,7 +44,11 @@ function num(value: unknown): number {
 function parseJson(value: unknown): unknown {
   if (value === '' || value === null || value === undefined) return {};
   if (typeof value !== 'string') return value;
-  return JSON.parse(value) as unknown;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return {};
+  }
 }
 
 function alternativeRoles(value: unknown): PipelineSummary['alternativeRoles'] {

@@ -744,7 +744,7 @@ test('route dispatch uses each resolved role runner without globally forcing scr
   assert.equal(harness.stubCallCount, 0, 'global script mode must not force the integrator to runStub');
 });
 
-test('route-required analysis roles all execute in route order', async () => {
+test('developer-less route records terminal blocked state after route roles execute', async () => {
   const runId = 'run-route-analysis-required';
   const route = makeRoute([
     binding('architect'),
@@ -765,19 +765,20 @@ test('route-required analysis roles all execute in route order', async () => {
   const developTaskImpl = makeDevelopTask(makeRunStep(deps), workflowDeps);
   const result = await developTaskImpl(runId, { route });
 
-  assert.equal(result.blocked, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.verdict, 'BLOCKED');
   assert.deepEqual(harness.loadRoleArgs, ['pb-architect', 'pb-analyst', 'pb-watcher']);
   const stepSucceeded = harness.appendEventArgs
     .filter((event) => event.type === 'step_succeeded')
     .map((event) => event.stepKey);
   assert.deepEqual(stepSucceeded, ['architect', 'analyst', 'watcher']);
   assert.equal(harness.stubCallCount, 0, 'analysis-only route must not synthesize an integrator');
-  assert.deepEqual(harness.completeRunArgs, [
-    {
-      runId,
-      opts: { actor: 'pipeline', source: 'pipeline-complete', verdict: 'PASS', iterations: 0 },
-    },
-  ]);
+  assert.deepEqual(harness.completeRunArgs, []);
+  const blocked = harness.appendEventInputs.find((event) => event.type === 'pipeline_blocked');
+  assert.deepEqual(blocked?.payload, {
+    reason: 'route',
+    message: 'pipeline local-change has no developer role',
+  });
 });
 
 test('canonical local-change route starts at developer, not orchestrator', async () => {
@@ -1040,6 +1041,47 @@ test('0008 #5: run-level budget hard-stop blocks the run (reason=budget)', async
   assert.ok(budgetEvt, 'pipeline_blocked with reason=budget must be written');
   // The architect step alone (cost 1 > 0.0001) trips the budget — integrator never runs.
   assert.equal(harness.stubCallCount, 0, 'integrator must not run after a budget block');
+});
+
+test('0008 #5: role-pass budget hard-stop blocks before the next role call', async () => {
+  const runId = 'run-budget-role-pass';
+  const route = makeRoute([
+    binding('developer'),
+    binding('reviewer'),
+    binding('watcher'),
+  ]);
+  const roles = new Map<string, Role>([
+    ['pb-developer', makeRole('developer', 'claude-code')],
+    ['pb-reviewer', makeRole('reviewer', 'claude-code')],
+    ['pb-watcher', makeRole('watcher', 'claude-code')],
+  ]);
+  const { deps, workflowDeps, harness } = buildDeps({
+    runId,
+    roles,
+    reviewerResults: [{ verdict: 'PASS' }],
+    policy: { maxReviewIterations: 3, maxAttempts: 3, budgetUsd: 0.0001, budgetTokens: 0 },
+  });
+  const baseRunAgent = deps.runAgent;
+  deps.runAgent = async (args) => {
+    const result = await baseRunAgent(args);
+    if (args.role.name === 'reviewer') {
+      return {
+        ...result,
+        costs: [{ modelProfile: 'standard', inputTokens: 10, outputTokens: 10, costAmount: 1, currency: 'USD' }],
+      };
+    }
+    return result;
+  };
+
+  const developTaskImpl = makeDevelopTask(makeRunStep(deps), workflowDeps);
+  const result = await developTaskImpl(runId, { route });
+
+  assert.equal(result.blocked, true);
+  assert.deepEqual(harness.loadRoleArgs, ['pb-developer', 'pb-reviewer']);
+  const budgetEvt = harness.appendEventInputs.find(
+    (event) => event.type === 'pipeline_blocked' && (event.payload as Record<string, unknown>).reason === 'budget',
+  );
+  assert.ok(budgetEvt, 'pipeline_blocked with reason=budget must be written');
 });
 
 test('0008 #4: a failing attempt-row write does NOT fail the step (observability is non-fatal)', async () => {

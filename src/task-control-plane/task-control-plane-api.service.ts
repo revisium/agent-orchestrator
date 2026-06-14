@@ -324,7 +324,7 @@ export class TaskControlPlaneApiService {
       priority: input.priority ?? 0,
       role: route.roleBindings[0]?.rowId ?? input.role ?? 'architect',
       playbookId: route.playbookId,
-      pipelineId: route.pipelineRowId,
+      pipelineId: route.pipelineId,
       params: route.params,
       routeDecision: route,
       executionProfile: route.executionProfile,
