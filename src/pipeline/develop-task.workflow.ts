@@ -624,16 +624,15 @@ export function makeDevelopTask(
       return await blockPipeline({ reason: 'integrate', lesson: integratorResult.lesson });
     }
 
-    let watcherResult: AttemptResult = { output: { verdict: 'PASS' }, nextSteps: [], costs: [] };
     if (integratorResult && routePlan.postIntegratorStatus.length > 0) {
-      watcherResult = await runRolePass(routePlan.postIntegratorStatus, integratorResult, '');
+      let watcherResult = await runRolePass(routePlan.postIntegratorStatus, integratorResult, '');
       if (overBudget()) return await blockBudget();
 
       let watcherIteration = 0;
       while (isBlocking(verdictOf(watcherResult)) && watcherIteration < policy.maxReviewIterations) {
         watcherIteration++;
         iteration++;
-        developerResult = await runStep(routePlan.developer, `${routePlan.developer.roleId}:watch#${watcherIteration}`, {
+        await runStep(routePlan.developer, `${routePlan.developer.roleId}:watch#${watcherIteration}`, {
           phase: 'watcher-fix',
           feedback: watcherResult.output,
         });
@@ -716,77 +715,29 @@ const SUPPORTED_ROUTE_PIPELINES = new Set([
 ]);
 
 function planRouteExecution(route: RouteDecision): RouteExecutionPlan {
-  if (!SUPPORTED_ROUTE_PIPELINES.has(route.pipelineId)) {
-    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} is not supported by develop-task workflow`);
-  }
-  if (route.roleBindings.length === 0) {
-    throw new Error(`ROUTE_INVALID: pipeline ${route.pipelineId} has no selected roles`);
-  }
-
-  const roleIds = new Set<string>();
-  for (const binding of route.roleBindings) {
-    if (roleIds.has(binding.roleId)) {
-      throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} has duplicate role binding: ${binding.roleId}`);
-    }
-    roleIds.add(binding.roleId);
-  }
-  for (const requiredRole of route.requiredRoles) {
-    if (!roleIds.has(requiredRole)) {
-      throw new Error(`ROUTE_INVALID: pipeline ${route.pipelineId} required role is not bound: ${requiredRole}`);
-    }
-  }
-
+  validateRouteBindings(route);
   const executableBindings = route.roleBindings.filter((binding) => !isOrchestrationRole(binding));
-  const integratorIndexes = executableBindings
-    .map((binding, index) => isIntegratorRole(binding) ? index : -1)
-    .filter((index) => index >= 0);
-  if (integratorIndexes.length > 1) {
-    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} has multiple integrator roles`);
-  }
-
-  const integratorIndex = integratorIndexes[0] ?? -1;
-  const postIntegratorStatus = integratorIndex >= 0
-    ? executableBindings.slice(integratorIndex + 1).filter((binding) => isPostIntegratorStatusRole(binding))
-    : [];
-  if (integratorIndex >= 0) {
-    const unsupportedAfter = executableBindings
-      .slice(integratorIndex + 1)
-      .filter((binding) => !isPostIntegratorStatusRole(binding));
-    if (unsupportedAfter.length > 0) {
-      const after = unsupportedAfter.map((binding) => binding.roleId).join(', ');
-      throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} has executable roles after integrator: ${after}`);
-    }
-  }
-
+  const integratorIndex = singleRoleIndex(route, executableBindings, isIntegratorRole, 'integrator');
+  const afterIntegratorBindings = integratorIndex >= 0 ? executableBindings.slice(integratorIndex + 1) : [];
+  const postIntegratorStatus = afterIntegratorBindings.filter((binding) => isPostIntegratorStatusRole(binding));
+  validatePostIntegratorBindings(route, afterIntegratorBindings);
   const nonIntegratorBindings = integratorIndex >= 0
     ? executableBindings.slice(0, integratorIndex)
     : executableBindings;
-  const developerIndexes = nonIntegratorBindings
-    .map((binding, index) => isDeveloperRole(binding) ? index : -1)
-    .filter((index) => index >= 0);
-  if (developerIndexes.length > 1) {
-    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} has multiple developer roles`);
-  }
-
-  const developerIndex = developerIndexes[0] ?? -1;
+  const developerIndex = singleRoleIndex(route, nonIntegratorBindings, isDeveloperRole, 'developer');
   const beforeDeveloperBindings = developerIndex >= 0 ? nonIntegratorBindings.slice(0, developerIndex) : nonIntegratorBindings;
   const afterDeveloperBindings = developerIndex >= 0 ? nonIntegratorBindings.slice(developerIndex + 1) : [];
   const reviewerBindings = beforeDeveloperBindings.filter((binding) => isReviewRole(binding));
   const canonicalFeatureDevelopmentCodeReview = route.pipelineId === 'feature-development' && afterDeveloperBindings.length === 0
     ? reviewerBindings
     : [];
-  if (route.pipelineId === 'feature-development' && canonicalFeatureDevelopmentCodeReview.length === 0) {
-    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} requires a post-developer reviewer`);
-  }
-  if (route.pipelineId === 'feature-development' && postIntegratorStatus.length === 0) {
-    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} requires a post-integrator watcher`);
-  }
+  validateFeatureDevelopmentRoute(route, canonicalFeatureDevelopmentCodeReview, postIntegratorStatus);
 
   return {
     beforeDeveloper: beforeDeveloperBindings.map((binding, index) => ({
       binding,
       stepKey: binding.roleId,
-      phase: index === 0 ? 'plan' : isReviewRole(binding) ? 'review' : 'prepare',
+      phase: beforeDeveloperPhase(binding, index),
     })),
     developer: developerIndex >= 0 ? nonIntegratorBindings[developerIndex] : undefined,
     afterDeveloper: [
@@ -808,6 +759,71 @@ function planRouteExecution(route: RouteDecision): RouteExecutionPlan {
       phase: 'status',
     })),
   };
+}
+
+function validateRouteBindings(route: RouteDecision): void {
+  if (!SUPPORTED_ROUTE_PIPELINES.has(route.pipelineId)) {
+    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} is not supported by develop-task workflow`);
+  }
+  if (route.roleBindings.length === 0) {
+    throw new Error(`ROUTE_INVALID: pipeline ${route.pipelineId} has no selected roles`);
+  }
+
+  const roleIds = new Set<string>();
+  for (const binding of route.roleBindings) {
+    if (roleIds.has(binding.roleId)) {
+      throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} has duplicate role binding: ${binding.roleId}`);
+    }
+    roleIds.add(binding.roleId);
+  }
+  for (const requiredRole of route.requiredRoles) {
+    if (!roleIds.has(requiredRole)) {
+      throw new Error(`ROUTE_INVALID: pipeline ${route.pipelineId} required role is not bound: ${requiredRole}`);
+    }
+  }
+}
+
+function singleRoleIndex(
+  route: RouteDecision,
+  bindings: RouteRoleBinding[],
+  predicate: (binding: RouteRoleBinding) => boolean,
+  roleLabel: string,
+): number {
+  const indexes = bindings
+    .map((binding, index) => predicate(binding) ? index : -1)
+    .filter((index) => index >= 0);
+  if (indexes.length > 1) {
+    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} has multiple ${roleLabel} roles`);
+  }
+  return indexes[0] ?? -1;
+}
+
+function validatePostIntegratorBindings(route: RouteDecision, bindings: RouteRoleBinding[]): void {
+  const unsupportedAfter = bindings.filter((binding) => !isPostIntegratorStatusRole(binding));
+  if (unsupportedAfter.length === 0) return;
+
+  const after = unsupportedAfter.map((binding) => binding.roleId).join(', ');
+  throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} has executable roles after integrator: ${after}`);
+}
+
+function validateFeatureDevelopmentRoute(
+  route: RouteDecision,
+  codeReviewBindings: RouteRoleBinding[],
+  postIntegratorStatus: RouteRoleBinding[],
+): void {
+  if (route.pipelineId !== 'feature-development') return;
+  if (codeReviewBindings.length === 0) {
+    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} requires a post-developer reviewer`);
+  }
+  if (postIntegratorStatus.length === 0) {
+    throw new Error(`ROUTE_UNSUPPORTED: pipeline ${route.pipelineId} requires a post-integrator watcher`);
+  }
+}
+
+function beforeDeveloperPhase(binding: RouteRoleBinding, index: number): RouteExecutionStep['phase'] {
+  if (index === 0) return 'plan';
+  if (isReviewRole(binding)) return 'review';
+  return 'prepare';
 }
 
 function isDeveloperRole(binding: RouteRoleBinding): boolean {

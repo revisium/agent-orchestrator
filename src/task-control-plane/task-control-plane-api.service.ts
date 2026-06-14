@@ -326,8 +326,8 @@ export class TaskControlPlaneApiService {
       playbookId: route.playbookId,
       pipelineId: route.pipelineRowId,
       params: route.params,
-      routeDecision: route as unknown as Record<string, unknown>,
-      executionProfile: route.executionProfile as unknown as Record<string, unknown>,
+      routeDecision: route,
+      executionProfile: route.executionProfile,
     });
     if (!input.start) return { ...result, started: false, route };
     const started = await this.startRun({
@@ -705,7 +705,7 @@ export class TaskControlPlaneApiService {
         `unable to choose a pipeline confidently; provide pipelineId`,
       );
     }
-    if (second && second.score === best.score) {
+    if (second?.score === best.score) {
       throw new ControlPlaneError(
         'VALIDATION_FAILURE',
         `ambiguous pipeline route; provide pipelineId`,

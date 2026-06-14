@@ -136,7 +136,8 @@ export class PlaybooksService {
     if (playbooks.length === 0) {
       throw new ControlPlaneError('ROW_NOT_FOUND', 'no installed playbook found');
     }
-    return playbooks.sort((left, right) => left.id.localeCompare(right.id))[0]!;
+    playbooks.sort((left, right) => left.id.localeCompare(right.id));
+    return playbooks[0];
   }
 
   async listPipelines(): Promise<PipelineSummary[]> {
@@ -164,7 +165,7 @@ export class PlaybooksService {
   async resolvePipeline(input: { playbookId?: string; pipelineId: string }): Promise<PipelineSummary> {
     const playbook = await this.resolvePlaybook(input.playbookId);
     const direct = await this.getPipeline(input.pipelineId);
-    if (direct && direct.playbookId === playbook.id) return direct;
+    if (direct?.playbookId === playbook.id) return direct;
 
     const pipelines = await this.listPipelines();
     const match = pipelines.find(
